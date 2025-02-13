@@ -14,10 +14,13 @@ This project implements a voice call bot using Twilio and OpenAI's Realtime API.
 
 1. Clone the repository
 2. Install dependencies:
+
    ```bash
    pnpm install
    ```
+
 3. Create a `.env` file in the root directory with the following variables:
+
    ```
    PORT=5050
    DOMAIN=your_domain (e.g., ngrok.io for local testing)
@@ -42,9 +45,11 @@ This project implements a voice call bot using Twilio and OpenAI's Realtime API.
    ```
 
 2. Start ngrok to expose your local server:
+
    ```bash
    ngrok http --url=your-ngrok-url.ngrok.io 5050
    ```
+
    Note: Save the HTTPS URL provided by ngrok (e.g., https://your-ngrok-url.ngrok.io)
 
 ## Twilio Configuration
@@ -53,10 +58,13 @@ This project implements a voice call bot using Twilio and OpenAI's Realtime API.
 2. Navigate to Phone Numbers → Manage → Active numbers
 3. Click on your Twilio phone number
 4. Under "Voice & Fax" section:
+
    - Set the webhook URL for "A Call Comes In" to:
+
      ```
      https://your-ngrok-url.ngrok.io/incoming-call
      ```
+
    - Set the webhook method to HTTP POST
 
 ## Testing with Dev Phone (Optional)
