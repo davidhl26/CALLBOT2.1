@@ -1,10 +1,11 @@
 import dotenv from "dotenv";
 import express from "express";
 import expressWs from "express-ws";
+import { readFileSync } from "fs";
+import { dirname, join } from "path";
+import twilio from "twilio";
+import { fileURLToPath } from "url";
 import WebSocket from "ws";
-import { readFileSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
 
 // Get the directory name of the current module
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -13,7 +14,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config();
 
 // Retrieve the OpenAI API key from environment variables.
-const { OPENAI_API_KEY } = process.env;
+const { OPENAI_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN } = process.env;
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OpenAI API key. Please set it in the .env file.");
@@ -29,8 +30,14 @@ app.use(express.urlencoded({ extended: true }));
 
 expressWs(app);
 
+// Initialize Twilio client
+const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+
 // Load system prompt from markdown file
-const SYSTEM_MESSAGE = readFileSync(join(__dirname, 'prompts', 'system.md'), 'utf-8');
+const SYSTEM_MESSAGE = readFileSync(
+  join(__dirname, "prompts", "system.md"),
+  "utf-8"
+);
 const VOICE = "alloy";
 const PORT = process.env.PORT || 5050;
 
@@ -59,17 +66,24 @@ app.all("/incoming-call", (req, res) => {
   console.log("Incoming call received. Request body:", req.body);
   console.log("Request headers:", req.headers);
 
+  // Store the Call SID in the session
+  const callSid = req.body.CallSid;
+  console.log("Call SID:", callSid);
+
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
                               <Say>Please wait while we connect your call to the A.I. voice assistant, powered by AJ Fahim and David.</Say>
                               <Pause length="1"/>
                               <Say>O.K. you can start talking!</Say>
                               <Connect>
-                                  <Stream url="wss://${req.headers.host}/media-stream" />
+                                  <Stream url="wss://${req.headers.host}/media-stream" callSid="${callSid}" />
                               </Connect>
                           </Response>`;
 
-  console.log("Sending TwiML response with Stream URL:", `wss://${req.headers.host}/media-stream`);
+  console.log(
+    "Sending TwiML response with Stream URL:",
+    `wss://${req.headers.host}/media-stream`
+  );
   res.type("text/xml").send(twimlResponse);
 });
 
@@ -79,10 +93,13 @@ app.ws("/media-stream", (ws, req) => {
 
   // Connection-specific state
   let streamSid = null;
+  let callSid = null;
   let latestMediaTimestamp = 0;
   let lastAssistantItem = null;
   let markQueue = [];
   let responseStartTimestampTwilio = null;
+  let lastUserInteractionTime = Date.now();
+  const INTERACTION_TIMEOUT = 30000; // 30 seconds
 
   const openAiWs = new WebSocket(
     "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01",
@@ -189,10 +206,23 @@ app.ws("/media-stream", (ws, req) => {
     }
   };
 
+  // Check for conversation timeout
+  const checkConversationTimeout = setInterval(() => {
+    const timeSinceLastInteraction = Date.now() - lastUserInteractionTime;
+    if (timeSinceLastInteraction > INTERACTION_TIMEOUT && callSid) {
+      console.log("Conversation timeout detected");
+      endCall(callSid);
+      clearInterval(checkConversationTimeout);
+    }
+  }, 5000);
+
   // Open event for OpenAI WebSocket
   openAiWs.on("open", () => {
     console.log("Connected to the OpenAI Realtime API");
     initializeSession();
+    setTimeout(() => {
+      sendInitialConversationItem();
+    }, 1000); // Add a small delay to ensure session is initialized
   });
 
   openAiWs.on("error", (error) => {
@@ -201,17 +231,39 @@ app.ws("/media-stream", (ws, req) => {
 
   openAiWs.on("close", (code, reason) => {
     console.log("OpenAI WebSocket closed:", code, reason);
+    clearInterval(checkConversationTimeout);
   });
 
   // Listen for messages from the OpenAI WebSocket
-  openAiWs.on("message", (data) => {
+  openAiWs.on("message", async (data) => {
     try {
       const response = JSON.parse(data);
 
-      if (LOG_EVENT_TYPES.includes(response.type)) {
-        console.log(`Received event: ${response.type}`, response);
-      }
+      // Log all message types and their content
+      console.log("\n=== OpenAI Message Received ===");
+      console.log("Message Type:", response.type);
+      console.log("Full Message:", JSON.stringify(response, null, 2));
 
+      const handleOpenAIMessage = (message) => {
+        console.log("\n=== OpenAI Message Received ===");
+        console.log("Message Type:", message.type);
+        console.log("Full Message:", JSON.stringify(message, null, 2));
+
+        if (message.type === "conversation.item.created" && message.item.role === "assistant") {
+          // Process assistant's response
+          const content = message.item.content;
+          if (content && content.length > 0) {
+            const text = content[0].text;
+            if (text) {
+              console.log("Assistant's response text:", text);
+            }
+          }
+        }
+      };
+
+      handleOpenAIMessage(response);
+
+      // Continue with audio processing
       if (response.type === "response.audio.delta" && response.delta) {
         const audioDelta = {
           event: "media",
@@ -220,7 +272,6 @@ app.ws("/media-stream", (ws, req) => {
         };
         ws.send(JSON.stringify(audioDelta));
 
-        // First delta from a new response starts the elapsed time counter
         if (!responseStartTimestampTwilio) {
           responseStartTimestampTwilio = latestMediaTimestamp;
           if (SHOW_TIMING_MATH)
@@ -241,6 +292,7 @@ app.ws("/media-stream", (ws, req) => {
       }
     } catch (error) {
       console.error("Error processing OpenAI message:", error);
+      console.error("Raw message:", data);
     }
   });
 
@@ -250,8 +302,11 @@ app.ws("/media-stream", (ws, req) => {
       const data = JSON.parse(msg);
 
       if (data.event === "start") {
-        streamSid = data.start.streamSid;
+        streamSid = data.streamSid;
+        callSid = data.start.customParameters.callSid;
         console.log("Media WS: Received start event");
+        console.log("Stream SID:", streamSid);
+        console.log("Call SID:", callSid);
         // Reset start and media timestamp on a new stream
         responseStartTimestampTwilio = null;
         latestMediaTimestamp = 0;
@@ -259,6 +314,7 @@ app.ws("/media-stream", (ws, req) => {
 
       if (data.event === "media") {
         latestMediaTimestamp = data.media.timestamp;
+        lastUserInteractionTime = Date.now(); // Update last interaction time
         if (openAiWs.readyState === WebSocket.OPEN) {
           const audioAppend = {
             type: "input_audio_buffer.append",
@@ -281,9 +337,24 @@ app.ws("/media-stream", (ws, req) => {
   // Handle WebSocket close
   ws.on("close", () => {
     console.log("Client disconnected");
-    openAiWs.close();
+    clearInterval(checkConversationTimeout);
+    if (openAiWs.readyState === WebSocket.OPEN) {
+      openAiWs.close();
+    }
   });
 });
+
+// Function to end the call using Twilio API
+const endCall = async (callSid) => {
+  try {
+    console.log("\n=== Attempting to End Call ===");
+    console.log("Call SID:", callSid);
+    await twilioClient.calls(callSid).update({ status: "completed" });
+    console.log(`Call ${callSid} ended successfully`);
+  } catch (error) {
+    console.error("Error ending call:", error);
+  }
+};
 
 // Start the server
 app.listen(PORT, () => {
