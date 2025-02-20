@@ -5,6 +5,7 @@
   "main": "index.js",
   "author": "Telnyx",
   "license": "MIT",
+   "type": "module",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
