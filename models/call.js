@@ -41,6 +41,9 @@ const Call = sequelize.define(
     system_message: {
       type: DataTypes.TEXT,
     },
+    recording_url: {
+      type: DataTypes.TEXT,
+    },
   },
   {
     timestamps: true, // This will add createdAt and updatedAt

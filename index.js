@@ -6,8 +6,9 @@ import dotenv from "dotenv";
 import Fastify from "fastify";
 import WebSocket from "ws";
 import sequelize from "./config/sequelize.js";
-import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 import Call from "./models/call.js";
+import callRoutes from "./routes/calls.js";
+import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -41,6 +42,7 @@ fastify.register(fastifyCors, {
 
 // Register routes
 fastify.register(telnyxNumberRoutes);
+fastify.register(callRoutes);
 
 // Constants
 let SYSTEM_MESSAGE =
@@ -90,6 +92,7 @@ fastify.post("/initiate-call", async (request, reply) => {
       To: to,
       From: from,
       UrlMethod: "GET",
+      Record: "true",
       Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler`,
       StatusCallback: `${process.env.PUBLIC_SERVER_URL}/call-status`,
     };
@@ -142,40 +145,45 @@ fastify.all("/outbound-call-handler", async (request, reply) => {
 // Call status webhook handler
 fastify.post("/call-status", async (request, reply) => {
   console.log("Call status update:", request.body);
-  
+
   try {
     const callData = request.body;
-    
+
     if (callData.CallSid) {
       const call = await Call.findOne({
-        where: { call_sid: callData.CallSid }
+        where: { call_sid: callData.CallSid },
       });
 
       if (call) {
-        // Update call status
         const updates = {
           status: callData.CallStatus,
         };
 
         // If it's a completion webhook
-        if (callData.CallStatus === 'completed') {
+        if (callData.CallStatus === "completed") {
           updates.end_time = new Date();
           updates.duration = parseInt(callData.CallDuration) || 0;
         }
 
         // If it's a cost webhook
-        if (callData.CallbackSource === 'call-cost-events') {
-          updates.cost = parseFloat(callData['CallCost[' + callData.CallSid + ']']) || 0;
+        if (callData.CallbackSource === "call-cost-events") {
+          updates.cost =
+            parseFloat(callData["CallCost[" + callData.CallSid + "]"]) || 0;
+        }
+
+        // If it's a recording completion webhook
+        if (callData.RecordingStatus === "completed" && callData.RecordingUrl) {
+          updates.recording_url = callData.RecordingUrl;
         }
 
         await call.update(updates);
       }
     }
 
-    reply.send({ status: "received" });
+    reply.send({ success: true });
   } catch (error) {
     console.error("Error updating call status:", error);
-    reply.send({ status: "error", error: error.message });
+    reply.code(500).send({ error: "Failed to update call status" });
   }
 });
 
