@@ -3,3 +3,5 @@ ssh -i "david-ai-callbot-server.pem" ubuntu@ec2-52-70-201-226.compute-1.amazonaw
 sudo cp -r /home/ubuntu/fiverr-david-call-bot-frontend/dist/* /var/www/frontend/
 
 
+sudo systemctl restart nginx
+
