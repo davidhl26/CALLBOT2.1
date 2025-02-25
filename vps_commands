@@ -5,3 +5,9 @@ sudo cp -r /home/ubuntu/fiverr-david-call-bot-frontend/dist/* /var/www/frontend/
 
 sudo systemctl restart nginx
 
+sudo nano /etc/nginx/sites-available/frontend
+sudo nano /etc/nginx/sites-available/backend
+
+sudo systemctl restart nginx
+
+
