@@ -1,0 +1,5 @@
+ssh -i "david-ai-callbot-server.pem" ubuntu@ec2-52-70-201-226.compute-1.amazonaws.com
+
+sudo cp -r /home/ubuntu/fiverr-david-call-bot-frontend/dist/* /var/www/frontend/
+
+

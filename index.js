@@ -132,6 +132,7 @@ fastify.post("/initiate-call", async (request, reply) => {
 
 // TeXML handler for outbound calls
 fastify.all("/outbound-call-handler", async (request, reply) => {
+  console.log("🚀 ~ fastify.all ~ request-header-host:", request.headers.host);
   const texmlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                         <Response>                           
                             <Connect>
