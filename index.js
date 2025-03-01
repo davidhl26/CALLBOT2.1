@@ -9,9 +9,9 @@ import sequelize from "./config/sequelize.js";
 import Call from "./models/call.js";
 import Campaign from "./models/campaign.js";
 import callRoutes from "./routes/calls.js";
+import campaignRoutes from "./routes/campaigns.js";
 import contactRoutes from "./routes/contacts.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
-import campaignRoutes from "./routes/campaigns.js";
 import { handleWebhook, processCampaignBatch } from "./services/campaign.js";
 
 // Load environment variables from .env file
@@ -39,7 +39,14 @@ if (!TELNYX_API_KEY) {
 // Initialize Fastify
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
-fastify.register(fastifyWs);
+fastify.register(fastifyWs, {
+  options: { 
+    // Use secure WebSocket in production
+    server: fastify.server,
+    clientTracking: true,
+    perMessageDeflate: true
+  }
+});
 fastify.register(fastifyCors, {
   origin: "*", // Update this to your frontend URL in production
 });
@@ -127,7 +134,7 @@ fastify.post("/initiate-call", async (request, reply) => {
       call_sid,
       from_number: from,
       to_number: to,
-      campaign_id
+      campaign_id,
     });
 
     const call = await Call.create({
@@ -136,7 +143,7 @@ fastify.post("/initiate-call", async (request, reply) => {
       to_number: to,
       status: "queued",
       campaign_id,
-      system_message
+      system_message,
     });
 
     console.log("Call record created:", call.toJSON());
@@ -145,7 +152,7 @@ fastify.post("/initiate-call", async (request, reply) => {
     console.error("Error making outbound call:", error.response?.data || error);
     reply.code(500).send({
       error: "Failed to initiate call",
-      details: error.response?.data || error.message
+      details: error.response?.data || error.message,
     });
   }
 });
@@ -153,14 +160,12 @@ fastify.post("/initiate-call", async (request, reply) => {
 // TeXML handler for outbound calls
 fastify.all("/outbound-call-handler", async (request, reply) => {
   console.log("🚀 ~ fastify.all ~ request-header-host:", request.headers.host);
-  // Use secure WebSocket in production
-  const protocol = process.env.NODE_ENV === 'production' ? 'wss' : 'ws';
-  const websocketURL = `${protocol}://${request.headers.host}/media-stream`;
+  const websocketURL = `wss://${request.headers.host}/media-stream`;
   console.log("🚀 ~ fastify.all ~ websocket:", websocketURL);
   const texmlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                         <Response>                           
                             <Connect>
-                                <Stream url="${websocketURL}" bidirectionalMode="rtp" />
+                                <Stream url="wss://${request.headers.host}/media-stream" bidirectionalMode="rtp" />
                             </Connect>
                         </Response>`;
 
@@ -176,7 +181,7 @@ fastify.post("/call-status", async (request, reply) => {
     // Find the call record
     const callSid = webhookData.CallSid;
     const call = await Call.findOne({ where: { call_sid: callSid } });
-    
+
     if (!call) {
       console.log(`No call found for SID: ${callSid}`);
       return reply.code(404).send({ error: "Call not found" });
@@ -185,53 +190,67 @@ fastify.post("/call-status", async (request, reply) => {
     console.log("Found call:", call.toJSON());
 
     // Handle different webhook types
-    if (webhookData.CallbackSource === 'call-progress-events') {
+    if (webhookData.CallbackSource === "call-progress-events") {
       // Update call status and duration
       const updates = {
         status: webhookData.CallStatus,
-        duration: webhookData.CallDuration ? parseInt(webhookData.CallDuration) : call.duration,
-        end_time: webhookData.CallStatus === 'completed' ? new Date() : call.end_time
+        duration: webhookData.CallDuration
+          ? parseInt(webhookData.CallDuration)
+          : call.duration,
+        end_time:
+          webhookData.CallStatus === "completed" ? new Date() : call.end_time,
       };
 
       await call.update(updates);
       console.log("Call updated successfully");
 
       // If call completed or failed, update campaign stats
-      if (webhookData.CallStatus === 'completed' || ['failed', 'no-answer', 'busy'].includes(webhookData.CallStatus)) {
+      if (
+        webhookData.CallStatus === "completed" ||
+        ["failed", "no-answer", "busy"].includes(webhookData.CallStatus)
+      ) {
         const campaign = await Campaign.findByPk(call.campaign_id);
         if (campaign) {
-          console.log(`Updating campaign ${campaign.id} stats for ${webhookData.CallStatus} call`);
-          
+          console.log(
+            `Updating campaign ${campaign.id} stats for ${webhookData.CallStatus} call`
+          );
+
           // Get all calls for this number in this campaign
           const numberCalls = await Call.findAll({
             where: {
               campaign_id: campaign.id,
-              to_number: call.to_number
-            }
+              to_number: call.to_number,
+            },
           });
-          
+
           // Check if all attempts for this number are completed or failed
-          const allAttemptsFinished = numberCalls.every(c => 
-            c.status === 'completed' || ['failed', 'no-answer', 'busy'].includes(c.status)
+          const allAttemptsFinished = numberCalls.every(
+            (c) =>
+              c.status === "completed" ||
+              ["failed", "no-answer", "busy"].includes(c.status)
           );
 
           // Only remove from numbers_to_call if all attempts are finished
           if (allAttemptsFinished) {
-            const remainingNumbers = campaign.numbers_to_call.filter(num => num !== call.to_number);
+            const remainingNumbers = campaign.numbers_to_call.filter(
+              (num) => num !== call.to_number
+            );
             await campaign.update({ numbers_to_call: remainingNumbers });
             console.log(`Removed ${call.to_number} from numbers_to_call`);
 
             // Update completed/failed counts
-            if (numberCalls.some(c => c.status === 'completed')) {
-              await campaign.increment('completed_calls');
+            if (numberCalls.some((c) => c.status === "completed")) {
+              await campaign.increment("completed_calls");
             } else {
-              await campaign.increment('failed_calls');
+              await campaign.increment("failed_calls");
             }
 
             // Check if campaign is completed
             if (remainingNumbers.length === 0) {
-              console.log(`Campaign ${campaign.id} completed - all numbers processed`);
-              await campaign.update({ status: 'completed' });
+              console.log(
+                `Campaign ${campaign.id} completed - all numbers processed`
+              );
+              await campaign.update({ status: "completed" });
             } else {
               // Start next batch if there are remaining numbers
               console.log(`Starting next batch for campaign ${campaign.id}`);
@@ -240,25 +259,23 @@ fastify.post("/call-status", async (request, reply) => {
           }
         }
       }
-    } 
-    else if (webhookData.CallbackSource === 'call-cost-events') {
+    } else if (webhookData.CallbackSource === "call-cost-events") {
       // Update call cost and campaign total cost
       const costKey = `CallCost[${callSid}]`;
       const cost = webhookData[costKey];
       if (cost) {
         const parsedCost = parseFloat(cost);
         await call.update({ cost: parsedCost });
-        
+
         // Update campaign total cost
         const campaign = await Campaign.findByPk(call.campaign_id);
         if (campaign) {
-          await campaign.increment('total_cost', { by: parsedCost });
+          await campaign.increment("total_cost", { by: parsedCost });
         }
-        
+
         console.log("Call and campaign costs updated successfully");
       }
-    }
-    else if (webhookData.RecordingStatus === 'completed') {
+    } else if (webhookData.RecordingStatus === "completed") {
       // Update recording URL
       await call.update({ recording_url: webhookData.RecordingUrl });
       console.log("Call recording URL updated successfully");
@@ -276,7 +293,7 @@ fastify.post("/webhook", async (request, reply) => {
   console.log("Webhook received:", request.body);
   try {
     const data = request.body;
-    
+
     // Handle TeXML webhook format
     if (data.CallSid) {
       console.log("Processing TeXML webhook:", data);
@@ -286,21 +303,26 @@ fastify.post("/webhook", async (request, reply) => {
           status: data.CallStatus,
           duration: data.CallDuration ? parseInt(data.CallDuration) : null,
           recording_url: data.RecordingUrl,
-          end_time: data.EndTime ? new Date(data.EndTime) : null
+          end_time: data.EndTime ? new Date(data.EndTime) : null,
         };
-        
+
         console.log("Updating call with TeXML data:", updates);
         await call.update(updates);
         console.log("Call updated successfully");
 
         // Update campaign stats if needed
-        if (call.campaign_id && (data.CallStatus === "completed" || data.CallStatus === "failed" || data.CallStatus === "no-answer")) {
+        if (
+          call.campaign_id &&
+          (data.CallStatus === "completed" ||
+            data.CallStatus === "failed" ||
+            data.CallStatus === "no-answer")
+        ) {
           const campaign = await Campaign.findByPk(call.campaign_id);
           if (campaign) {
             if (data.CallStatus === "completed") {
-              await campaign.increment('completed_calls');
+              await campaign.increment("completed_calls");
             } else {
-              await campaign.increment('failed_calls');
+              await campaign.increment("failed_calls");
             }
             console.log("Campaign stats updated");
           }
@@ -308,30 +330,38 @@ fastify.post("/webhook", async (request, reply) => {
       }
     }
     // Handle Telnyx webhook format
-    else if (data.data?.event_type?.startsWith('call.')) {
+    else if (data.data?.event_type?.startsWith("call.")) {
       console.log("Processing Telnyx webhook:", data);
-      const callSid = data.data.payload.call_control_id || data.data.payload.call_sid;
+      const callSid =
+        data.data.payload.call_control_id || data.data.payload.call_sid;
       const status = data.data.payload.result;
       const duration = data.data.payload.duration;
       const recordingUrl = data.data.payload.recording_url;
-      
+
       const call = await Call.findOne({ where: { call_sid: callSid } });
       if (call) {
         const updates = {};
-        
+
         if (status) updates.status = status;
         if (duration) updates.duration = parseInt(duration);
         if (recordingUrl) updates.recording_url = recordingUrl;
-        
+
         console.log("Updating call with Telnyx data:", updates);
         await call.update(updates);
         console.log("Call updated successfully");
 
         // Update campaign stats if needed
-        if (call.campaign_id && (status === "completed" || status === "failed" || status === "no-answer")) {
+        if (
+          call.campaign_id &&
+          (status === "completed" ||
+            status === "failed" ||
+            status === "no-answer")
+        ) {
           const campaign = await Campaign.findByPk(call.campaign_id);
           if (campaign) {
-            await campaign.increment(status === "completed" ? 'completed_calls' : 'failed_calls');
+            await campaign.increment(
+              status === "completed" ? "completed_calls" : "failed_calls"
+            );
             console.log("Campaign stats updated");
           }
         }
@@ -342,7 +372,9 @@ fastify.post("/webhook", async (request, reply) => {
     reply.send({ status: "success" });
   } catch (error) {
     console.error("Error handling webhook:", error);
-    reply.code(500).send({ error: "Failed to process webhook", details: error.message });
+    reply
+      .code(500)
+      .send({ error: "Failed to process webhook", details: error.message });
   }
 });
 
