@@ -44,6 +44,13 @@ const Call = sequelize.define(
     recording_url: {
       type: DataTypes.TEXT,
     },
+    campaign_id: {
+      type: DataTypes.INTEGER,
+      references: {
+        model: 'Campaigns',
+        key: 'id'
+      }
+    }
   },
   {
     timestamps: true, // This will add createdAt and updatedAt

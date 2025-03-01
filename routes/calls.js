@@ -30,7 +30,7 @@ async function callRoutes(fastify, options) {
 
       return {
         calls,
-        total: calls.length
+        total: calls.length,
       };
     } catch (error) {
       console.error("Error fetching calls:", error);
