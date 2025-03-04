@@ -1,6 +1,8 @@
 import sequelize from "../config/sequelize.js";
 import Call from "../models/call.js";
 import Campaign from "../models/campaign.js";
+import Contact from "../models/Contact.js"; // Fixed import path
+import db from "../models/index.js";
 import {
   processCampaignBatch,
   recycleCampaign,
@@ -235,7 +237,7 @@ export default async function campaignRoutes(fastify, options) {
   // Get campaign statistics with call logs
   fastify.get("/:id/stats", async (request, reply) => {
     try {
-      const campaign = await Campaign.findByPk(request.params.id);
+      const campaign = await db.Campaign.findByPk(request.params.id);
 
       if (!campaign) {
         return reply.code(404).send({ error: "Campaign not found" });
@@ -276,7 +278,7 @@ export default async function campaignRoutes(fastify, options) {
       }
 
       // Get call logs for this campaign
-      const { count, rows: callLogs } = await Call.findAndCountAll({
+      const { count, rows: callLogs } = await db.Call.findAndCountAll({
         where: whereClause,
         order: [[sortField, sortOrder]],
         limit,
@@ -291,6 +293,15 @@ export default async function campaignRoutes(fastify, options) {
           "duration",
           "cost",
           "recording_url",
+          "contact_id",
+        ],
+        include: [
+          {
+            model: db.Contact,
+            as: "contact",
+            attributes: ["firstName", "lastName", "gender"],
+            required: false,
+          },
         ],
       });
 
@@ -476,6 +487,13 @@ export default async function campaignRoutes(fastify, options) {
                 : null,
               cost: call.cost ? `$${parseFloat(call.cost).toFixed(4)}` : null,
               recording: call.recording_url,
+              contact: call.contact
+                ? {
+                    firstName: call.contact.firstName,
+                    lastName: call.contact.lastName,
+                    gender: call.contact.gender,
+                  }
+                : null,
             })),
             pagination: {
               total: count,
@@ -490,6 +508,65 @@ export default async function campaignRoutes(fastify, options) {
     } catch (error) {
       console.error("Error getting campaign stats:", error);
       reply.code(500).send({ error: "Failed to get campaign statistics" });
+    }
+  });
+
+  // Get call logs for a campaign
+  fastify.get("/:id/calls", async (request, reply) => {
+    try {
+      const page = parseInt(request.query.page) || 1;
+      const limit = parseInt(request.query.limit) || 10;
+      const offset = (page - 1) * limit;
+
+      const { count, rows } = await Call.findAndCountAll({
+        where: { campaign_id: request.params.id },
+        include: [
+          {
+            model: Contact,
+            as: "contact",
+            attributes: ["firstName", "lastName", "gender"],
+          },
+        ],
+        order: [["createdAt", "DESC"]],
+        limit,
+        offset,
+      });
+
+      // Format calls to include contact information
+      const formattedCalls = rows.map((call) => ({
+        id: call.id,
+        call_sid: call.call_sid,
+        from_number: call.from_number,
+        to_number: call.to_number,
+        status: call.status,
+        start_time: call.start_time,
+        end_time: call.end_time,
+        duration: call.duration,
+        cost: call.cost,
+        recording_url: call.recording_url,
+        contact: call.contact
+          ? {
+              firstName: call.contact.firstName,
+              lastName: call.contact.lastName,
+              gender: call.contact.gender,
+            }
+          : null,
+        createdAt: call.createdAt,
+        updatedAt: call.updatedAt,
+      }));
+
+      return {
+        calls: formattedCalls,
+        total: count,
+        page: page,
+        totalPages: Math.ceil(count / limit),
+      };
+    } catch (error) {
+      console.error("Error listing campaign calls:", error);
+      reply.code(500).send({
+        error: "Failed to list campaign calls",
+        details: error.message,
+      });
     }
   });
 }

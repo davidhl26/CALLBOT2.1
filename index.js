@@ -13,6 +13,7 @@ import campaignRoutes from "./routes/campaigns.js";
 import contactRoutes from "./routes/contacts.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 import { handleWebhook, processCampaignBatch } from "./services/campaign.js";
+import Contact from "./models/Contact.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -40,12 +41,12 @@ if (!TELNYX_API_KEY) {
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs, {
-  options: { 
+  options: {
     // Use secure WebSocket in production
     server: fastify.server,
     clientTracking: true,
-    perMessageDeflate: true
-  }
+    perMessageDeflate: true,
+  },
 });
 fastify.register(fastifyCors, {
   origin: "*", // Update this to your frontend URL in production
@@ -96,7 +97,7 @@ fastify.all("/incoming-call", async (request, reply) => {
 // Route for initiating outbound calls
 fastify.post("/initiate-call", async (request, reply) => {
   console.log("Initiating call with:", request.body);
-  const { to, from, system_message, campaign_id } = request.body;
+  const { to, from, system_message, campaign_id, contact_id } = request.body;
 
   try {
     const data = {
@@ -135,6 +136,7 @@ fastify.post("/initiate-call", async (request, reply) => {
       from_number: from,
       to_number: to,
       campaign_id,
+      contact_id,
     });
 
     const call = await Call.create({
@@ -143,6 +145,7 @@ fastify.post("/initiate-call", async (request, reply) => {
       to_number: to,
       status: "queued",
       campaign_id,
+      contact_id,
       system_message,
     });
 

@@ -47,13 +47,22 @@ const Call = sequelize.define(
     campaign_id: {
       type: DataTypes.INTEGER,
       references: {
-        model: 'Campaigns',
-        key: 'id'
-      }
-    }
+        model: "Campaigns",
+        key: "id",
+      },
+    },
+    contact_id: {
+      type: DataTypes.UUID,
+      references: {
+        model: "Contacts",
+        key: "id",
+      },
+    },
   },
   {
-    timestamps: true, // This will add createdAt and updatedAt
+    timestamps: true,
+    modelName: "Call",
+    tableName: "Calls",
   }
 );
 
