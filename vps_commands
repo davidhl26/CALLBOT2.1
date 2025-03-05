@@ -11,3 +11,6 @@ sudo nano /etc/nginx/sites-available/backend
 sudo systemctl restart nginx
 
 
+cartesian = sk_car_OIjvHlXSMuJMJLPmm0Iuz
+
+

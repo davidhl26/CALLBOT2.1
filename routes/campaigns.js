@@ -1,3 +1,5 @@
+import fastifyMultipart from "@fastify/multipart";
+import { parse } from "csv-parse/sync";
 import sequelize from "../config/sequelize.js";
 import Call from "../models/call.js";
 import Campaign from "../models/campaign.js";
@@ -10,6 +12,13 @@ import {
 } from "../services/campaign.js";
 
 export default async function campaignRoutes(fastify, options) {
+  // Register multipart plugin
+  fastify.register(fastifyMultipart, {
+    limits: {
+      fieldSize: 1024 * 1024 * 10, // 10MB max file size
+    },
+  });
+
   // Create a new campaign
   fastify.post("/", async (request, reply) => {
     try {
@@ -565,6 +574,117 @@ export default async function campaignRoutes(fastify, options) {
       console.error("Error listing campaign calls:", error);
       reply.code(500).send({
         error: "Failed to list campaign calls",
+        details: error.message,
+      });
+    }
+  });
+
+  // Add this new endpoint
+  fastify.post("/create-with-csv", async (request, reply) => {
+    try {
+      // Initialize variables to store form data
+      let csvFile;
+      let name;
+      let telnyxNumbers;
+      let systemMessage;
+
+      // Process all parts of the multipart form
+      for await (const part of request.parts()) {
+        if (part.type === "file") {
+          csvFile = await part.toBuffer();
+        } else {
+          // Handle other form fields
+          switch (part.fieldname) {
+            case "name":
+              name = part.value;
+              break;
+            case "telnyx_numbers":
+              telnyxNumbers = JSON.parse(part.value);
+              break;
+            case "system_message":
+              systemMessage = part.value;
+              break;
+          }
+        }
+      }
+
+      // Validate required fields
+      if (!csvFile || !name || !telnyxNumbers || !systemMessage) {
+        return reply.code(400).send({
+          error:
+            "Missing required fields: file, name, telnyx_numbers, system_message",
+        });
+      }
+
+      // Parse CSV
+      const csvContent = csvFile.toString();
+      const contacts = parse(csvContent, {
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+      });
+
+      // Validate required fields
+      const requiredFields = ["phoneNumber", "firstName", "lastName", "gender"];
+      const missingFields = contacts.some((contact) =>
+        requiredFields.some((field) => !contact[field])
+      );
+
+      if (missingFields) {
+        return reply.code(400).send({
+          error:
+            "CSV must contain phoneNumber, firstName, lastName, and gender columns",
+        });
+      }
+
+      // Extract phone numbers for campaign
+      const phoneNumbers = contacts.map((contact) => contact.phoneNumber);
+
+      // Create campaign with the parsed form data
+      const campaign = await db.Campaign.create({
+        name,
+        all_numbers: phoneNumbers,
+        numbers_to_call: phoneNumbers,
+        telnyx_numbers: telnyxNumbers,
+        system_message: systemMessage,
+        status: "pending",
+        total_calls: phoneNumbers.length,
+      });
+
+      // Create or update contacts
+      await db.Contact.bulkCreate(
+        contacts.map((contact) => ({
+          phoneNumber: contact.phoneNumber,
+          firstName: contact.firstName,
+          lastName: contact.lastName,
+          gender: contact.gender,
+          email: contact.email || null,
+          company: contact.company || null,
+          notes: contact.notes || null,
+          status: "Active",
+        })),
+        {
+          updateOnDuplicate: [
+            "firstName",
+            "lastName",
+            "gender",
+            "email",
+            "company",
+            "notes",
+          ],
+          where: { phoneNumber: contacts.map((c) => c.phoneNumber) },
+        }
+      );
+
+      return {
+        success: true,
+        campaign,
+        contactsProcessed: contacts.length,
+      };
+    } catch (error) {
+      console.error("Error creating campaign from CSV:", error);
+      reply.code(500).send({
+        error: "Failed to create campaign from CSV",
         details: error.message,
       });
     }
