@@ -35,9 +35,6 @@ const Contact = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
       defaultValue: "Mr",
-      validate: {
-        isIn: [["Mr", "Mrs"]],
-      },
     },
     email: {
       type: DataTypes.STRING,
