@@ -6,6 +6,7 @@ async function contactRoutes(fastify, options) {
   fastify.post("/api/contacts", async (request, reply) => {
     try {
       const contact = await Contact.create(request.body);
+      console.log("check",req.body);
       return contact;
     } catch (error) {
       console.error("Error creating contact:", error);

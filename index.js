@@ -9,6 +9,7 @@ import sequelize from "./config/sequelize.js";
 import Call from "./models/call.js";
 import Campaign from "./models/campaign.js";
 import callRoutes from "./routes/calls.js";
+import userRoutes from "./routes/user.js";
 import campaignRoutes from "./routes/campaigns.js";
 import contactRoutes from "./routes/contacts.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
@@ -55,6 +56,7 @@ fastify.register(fastifyCors, {
 // Register routes
 fastify.register(telnyxNumberRoutes);
 fastify.register(callRoutes);
+fastify.register(userRoutes);
 fastify.register(contactRoutes);
 fastify.register(campaignRoutes, { prefix: "/api/campaigns" });
 
