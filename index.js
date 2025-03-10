@@ -15,6 +15,9 @@ import contactRoutes from "./routes/contacts.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 import { handleWebhook, processCampaignBatch } from "./services/campaign.js";
 import Contact from "./models/Contact.js";
+import { createClient } from "@deepgram/sdk";
+import fs from "fs";
+import { pipeline } from "stream/promises";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -52,6 +55,9 @@ fastify.register(fastifyWs, {
 fastify.register(fastifyCors, {
   origin: "*", // Update this to your frontend URL in production
 });
+
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+
 
 // Register routes
 fastify.register(telnyxNumberRoutes);
@@ -162,6 +168,38 @@ fastify.post("/initiate-call", async (request, reply) => {
   }
 });
 
+fastify.post("/text-to-speech", async (request, reply) => {
+  try {
+    const { text } = request.body;
+    if (!text) {
+      return reply.status(400).send({ error: "Text is required" });
+    }
+
+    const response = await deepgram.speak.request(
+      { text },
+      { model: "aura-asteria-en" }
+    );
+
+    const stream = await response.getStream();
+    if (!stream) {
+      return reply.status(500).send({ error: "Error generating audio" });
+    }
+
+    const outputFile = "output.mp3";
+    const file = fs.createWriteStream(outputFile);
+    await pipeline(stream, file);
+    console.log(`Audio saved as ${outputFile}`);
+
+    reply.header("Content-Type", "audio/mpeg");
+    reply.header("Content-Disposition", 'attachment; filename="speech.mp3"');
+
+    return reply.send(fs.createReadStream(outputFile)); // Send the audio file
+  } catch (error) {
+    console.error("Error:", error);
+    reply.status(500).send({ error: "Something went wrong" });
+  }
+});
+
 // TeXML handler for outbound calls
 fastify.all("/outbound-call-handler", async (request, reply) => {
   console.log("🚀 ~ fastify.all ~ request-header-host:", request.headers.host);
@@ -170,7 +208,7 @@ fastify.all("/outbound-call-handler", async (request, reply) => {
   const texmlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                         <Response>                           
                             <Connect>
-                                <Stream url="wss://${request.headers.host}/media-stream" bidirectionalMode="rtp" />
+                                <Stream url="wss://${request.headers.host}/media-stream2" bidirectionalMode="rtp" />
                             </Connect>
                         </Response>`;
 
@@ -386,6 +424,124 @@ fastify.post("/webhook", async (request, reply) => {
 // WebSocket route for media-stream
 fastify.register(async (fastify) => {
   fastify.get("/media-stream", { websocket: true }, (connection, req) => {
+    console.log("Client connected");
+
+    const openAiWs = new WebSocket(
+      "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01",
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "realtime=v1",
+        },
+      }
+    );
+
+    let streamSid = null;
+
+    const sendSessionUpdate = () => {
+      const sessionUpdate = {
+        type: "session.update",
+        session: {
+          turn_detection: { type: "server_vad" },
+          input_audio_format: "g711_ulaw",
+          output_audio_format: "g711_ulaw",
+          voice: VOICE,
+          instructions: SYSTEM_MESSAGE,
+          modalities: ["text", "audio"],
+          temperature: 0.8,
+        },
+      };
+
+      console.log("Sending session update:", JSON.stringify(sessionUpdate));
+      openAiWs.send(JSON.stringify(sessionUpdate));
+    };
+
+    // Open event for OpenAI WebSocket
+    openAiWs.on("open", () => {
+      console.log("Connected to the OpenAI Realtime API");
+      setTimeout(sendSessionUpdate, 250); // Ensure connection stability, send after .25 seconds
+    });
+
+    // Listen for messages from the OpenAI WebSocket (and send to Telnyx if necessary)
+    openAiWs.on("message", (data) => {
+      try {
+        const response = JSON.parse(data);
+
+        if (LOG_EVENT_TYPES.includes(response.type)) {
+          console.log(`Received event: ${response.type}`, response);
+        }
+
+        if (response.type === "session.updated") {
+          console.log("Session updated successfully:", response);
+        }
+
+        if (response.type === "response.audio.delta" && response.delta) {
+          const audioDelta = {
+            event: "media",
+            media: {
+              payload: Buffer.from(response.delta, "base64").toString("base64"),
+            },
+          };
+          connection.send(JSON.stringify(audioDelta));
+        }
+      } catch (error) {
+        console.error(
+          "Error processing OpenAI message:",
+          error,
+          "Raw message:",
+          data
+        );
+      }
+    });
+
+    // Handle incoming messages from Telnyx
+    connection.on("message", (message) => {
+      try {
+        const data = JSON.parse(message);
+
+        switch (data.event) {
+          case "media":
+            if (openAiWs.readyState === WebSocket.OPEN) {
+              const audioAppend = {
+                type: "input_audio_buffer.append",
+                audio: data.media.payload,
+              };
+
+              openAiWs.send(JSON.stringify(audioAppend));
+            }
+            break;
+          case "start":
+            streamSid = data.stream_id;
+            console.log("Incoming stream has started", streamSid);
+            break;
+          default:
+            console.log("Received non-media event:", data.event);
+            break;
+        }
+      } catch (error) {
+        console.error("Error parsing message:", error, "Message:", message);
+      }
+    });
+
+    // Handle connection close
+    connection.on("close", () => {
+      if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+      console.log("Client disconnected.");
+    });
+
+    // Handle WebSocket close and errors
+    openAiWs.on("close", () => {
+      console.log("Disconnected from the OpenAI Realtime API");
+    });
+
+    openAiWs.on("error", (error) => {
+      console.error("Error in the OpenAI WebSocket:", error);
+    });
+  });
+});
+
+fastify.register(async (fastify) => {
+  fastify.get("/media-stream2", { websocket: true }, (connection, req) => {
     console.log("Client connected");
 
     const openAiWs = new WebSocket(
