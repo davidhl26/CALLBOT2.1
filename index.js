@@ -15,7 +15,7 @@ import contactRoutes from "./routes/contacts.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 import { handleWebhook, processCampaignBatch } from "./services/campaign.js";
 import Contact from "./models/Contact.js";
-import { createClient } from "@deepgram/sdk";
+import { createClient, LiveTTSEvents } from "@deepgram/sdk";
 import fs from "fs";
 import { pipeline } from "stream/promises";
 
@@ -40,6 +40,7 @@ if (!TELNYX_API_KEY) {
   console.error("Missing Telnyx API key. Please set it in the .env file.");
   process.exit(1);
 }
+
 
 // Initialize Fastify
 const fastify = Fastify();
@@ -541,91 +542,163 @@ fastify.register(async (fastify) => {
 });
 
 fastify.register(async (fastify) => {
+  // Route for Deepgram Live TTS WebSocket
+  // This endpoint accepts WebSocket connections and uses Deepgram's Live TTS API
+  // to convert text to speech in real-time.
+  // 
+  // To use this endpoint:
+  // 1. Connect to this WebSocket endpoint
+  // 2. Send a message with event: "text" and text: "Your text to convert to speech"
+  // 3. Receive audio data with event: "media" and media.payload containing base64 audio
+  //
+  // Example client message:
+  // {
+  //   "event": "text",
+  //   "text": "Hello, this is a test message."
+  // }
   fastify.get("/media-stream2", { websocket: true }, (connection, req) => {
     console.log("Client connected");
 
-    const openAiWs = new WebSocket(
-      "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01",
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "realtime=v1",
-        },
-      }
-    );
-
     let streamSid = null;
-
-    const sendSessionUpdate = () => {
-      const sessionUpdate = {
-        type: "session.update",
-        session: {
-          turn_detection: { type: "server_vad" },
-          input_audio_format: "g711_ulaw",
-          output_audio_format: "g711_ulaw",
-          voice: VOICE,
-          instructions: SYSTEM_MESSAGE,
-          modalities: ["text", "audio"],
-          temperature: 0.8,
-        },
-      };
-
-      console.log("Sending session update:", JSON.stringify(sessionUpdate));
-      openAiWs.send(JSON.stringify(sessionUpdate));
-    };
-
-    // Open event for OpenAI WebSocket
-    openAiWs.on("open", () => {
-      console.log("Connected to the OpenAI Realtime API");
-      setTimeout(sendSessionUpdate, 250); // Ensure connection stability, send after .25 seconds
+    let audioBuffer = Buffer.alloc(0);
+    
+    // Initialize Deepgram live TTS connection
+    console.log("Initializing Deepgram live TTS connection...");
+    const dgConnection = deepgram.speak.live({ 
+      model: "aura-asteria-en",
+      voice: "male",         // Specify a male voice
+      encoding: "mulaw",     // Use mulaw encoding for compatibility with g711_ulaw
+      sample_rate: 8000,     // Use 8kHz sample rate for telephony
+      container: "none",     // No container format for raw audio
+      volume: 2.0            // Increase volume (default is 1.0)
     });
+    console.log("Deepgram connection initialized, waiting for open event...");
 
-    // Listen for messages from the OpenAI WebSocket (and send to Telnyx if necessary)
-    openAiWs.on("message", (data) => {
-      try {
-        const response = JSON.parse(data);
+    // Set a timeout to check if the connection opened
+    const connectionTimeout = setTimeout(() => {
+      console.log("Deepgram connection timeout - connection state:", dgConnection.getReadyState());
+      if (dgConnection.getReadyState() !== 1) { // Not OPEN
+        console.log("Deepgram connection failed to open within timeout period");
+      }
+    }, 5000); // 5 second timeout
 
-        if (LOG_EVENT_TYPES.includes(response.type)) {
-          console.log(`Received event: ${response.type}`, response);
+    // Handle Deepgram connection open event
+    dgConnection.on(LiveTTSEvents.Open, () => {
+      console.log("Connected to Deepgram Live TTS API");
+      clearTimeout(connectionTimeout);
+      
+      // Send a welcome message when connection is established
+      console.log("Waiting 1 second before sending welcome message...");
+      setTimeout(() => {
+        // Send multiple shorter messages instead of one long message
+        const messages = [
+          "Testing, testing, 1, 2, 3. Can you hear me?",
+          "Hello! Welcome to our automated phone system.",
+          "This is a test call using Deepgram's text to speech technology.",
+          "If you can hear this message clearly, please press any key on your phone.",
+          "I will now count from one to ten.",
+          "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten.",
+          "Thank you for your attention. This concludes our test message."
+        ];
+        
+        // Send each message with a delay between them
+        const sendMessages = (index) => {
+          if (index >= messages.length) return;
+          
+          const message = messages[index];
+          console.log(`Sending message ${index + 1}/${messages.length}:`, message);
+          dgConnection.sendText(message);
+          dgConnection.flush();
+          
+          // Schedule the next message
+          setTimeout(() => sendMessages(index + 1), 1500);
+        };
+        
+        // Start sending messages
+        sendMessages(0);
+      }, 1000); // Wait 1 second before sending welcome message
+      
+      // Handle incoming audio data from Deepgram
+      dgConnection.on(LiveTTSEvents.Audio, (data) => {
+        console.log("Deepgram audio data received, length:", data.length);
+        
+        // Skip empty audio data
+        if (!data || data.length === 0) {
+          console.log("Received empty audio data, skipping");
+          return;
         }
-
-        if (response.type === "session.updated") {
-          console.log("Session updated successfully:", response);
-        }
-
-        if (response.type === "response.audio.delta" && response.delta) {
+        
+        try {
+          // Convert the audio data to base64 for sending to client
+          const base64Data = Buffer.from(data).toString('base64');
+          
+          // Format the audio data for the client
           const audioDelta = {
             event: "media",
             media: {
-              payload: Buffer.from(response.delta, "base64").toString("base64"),
+              payload: base64Data,
             },
           };
-          connection.send(JSON.stringify(audioDelta));
+          
+          try {
+            connection.send(JSON.stringify(audioDelta));
+            console.log("Sent audio data to client, length:", data.length);
+          } catch (error) {
+            console.error("Error sending audio data to client:", error);
+          }
+        } catch (error) {
+          console.error("Error processing audio data:", error);
         }
-      } catch (error) {
-        console.error(
-          "Error processing OpenAI message:",
-          error,
-          "Raw message:",
-          data
-        );
-      }
+      });
+      
+      // Handle Deepgram flush event
+      dgConnection.on(LiveTTSEvents.Flushed, () => {
+        console.log("Deepgram Flushed");
+        audioBuffer = Buffer.alloc(0); // Reset buffer after sending
+      });
+      
+      // Handle Deepgram metadata event
+      dgConnection.on(LiveTTSEvents.Metadata, (data) => {
+        console.log("Deepgram metadata received:", data);
+      });
+      
+      // Handle Deepgram errors
+      dgConnection.on(LiveTTSEvents.Error, (err) => {
+        console.error("Deepgram error:", err);
+      });
+      
+      // Handle Deepgram connection close
+      dgConnection.on(LiveTTSEvents.Close, () => {
+        console.log("Deepgram connection closed");
+      });
     });
 
-    // Handle incoming messages from Telnyx
+    // Handle incoming messages from client
     connection.on("message", (message) => {
       try {
         const data = JSON.parse(message);
 
         switch (data.event) {
           case "media":
-            if (openAiWs.readyState === WebSocket.OPEN) {
-              const audioAppend = {
-                type: "input_audio_buffer.append",
-                audio: data.media.payload,
-              };
-
-              openAiWs.send(JSON.stringify(audioAppend));
+            // We're receiving media from the client, but we don't need to process it
+            // Just log it once in a while to avoid flooding the console
+            if (Math.random() < 0.01) { // Only log approximately 1% of media events
+              console.log("Received media from client");
+            }
+            break;
+          case "text":
+            // If client sends text to be synthesized
+            if (!data.text) {
+              console.error("Received text event without text property");
+              break;
+            }
+            
+            if (dgConnection.getReadyState() === 1) { // OPEN
+              console.log("Sending text to Deepgram:", data.text);
+              dgConnection.sendText(data.text);
+              dgConnection.flush();
+            } else {
+              console.log("Deepgram connection not open, cannot send text");
             }
             break;
           case "start":
@@ -643,17 +716,16 @@ fastify.register(async (fastify) => {
 
     // Handle connection close
     connection.on("close", () => {
-      if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+      if (dgConnection.getReadyState() === 1) { // OPEN
+        try {
+          // Use finish() instead of close() to properly close the Deepgram connection
+          dgConnection.finish();
+          console.log("Deepgram connection finished");
+        } catch (error) {
+          console.error("Error closing Deepgram connection:", error);
+        }
+      }
       console.log("Client disconnected.");
-    });
-
-    // Handle WebSocket close and errors
-    openAiWs.on("close", () => {
-      console.log("Disconnected from the OpenAI Realtime API");
-    });
-
-    openAiWs.on("error", (error) => {
-      console.error("Error in the OpenAI WebSocket:", error);
     });
   });
 });
