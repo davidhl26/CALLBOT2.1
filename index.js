@@ -630,7 +630,20 @@ fastify.register(async (fastify) => {
         
         try {
           // Convert the audio data to base64 for sending to client
-          const base64Data = Buffer.from(data).toString('base64');
+          const buffer = Buffer.from(data);
+          const base64Data = buffer.toString('base64');
+          
+          // Collect outgoing audio samples for analysis
+          if (outgoingSampleCount < MAX_SAMPLES) {
+            outgoingAudioSamples.push(buffer);
+            outgoingSampleCount++;
+            
+            if (outgoingSampleCount === MAX_SAMPLES) {
+              console.log(`Collected ${MAX_SAMPLES} outgoing audio samples, saving to file...`);
+              saveAudioSamples(outgoingAudioSamples, "outgoing");
+              outgoingAudioSamples = [];
+            }
+          }
           
           // Format the audio data for the client
           const audioDelta = {
@@ -673,6 +686,54 @@ fastify.register(async (fastify) => {
       });
     });
 
+    // Variables to collect audio samples
+    let incomingAudioSamples = [];
+    let outgoingAudioSamples = [];
+    let incomingSampleCount = 0;
+    let outgoingSampleCount = 0;
+    const MAX_SAMPLES = 10;
+
+    // Function to save collected audio samples to a file
+    const saveAudioSamples = (samples, prefix) => {
+      if (samples.length === 0) {
+        console.log(`No ${prefix} audio samples to save`);
+        return;
+      }
+      
+      try {
+        // Concatenate all audio samples
+        const combinedBuffer = Buffer.concat(samples);
+        
+        // Save to file
+        const filename = `${prefix}-audio-${Date.now()}.raw`;
+        fs.writeFileSync(filename, combinedBuffer);
+        console.log(`Saved ${samples.length} ${prefix} audio samples to ${filename}, total size: ${combinedBuffer.length} bytes`);
+        
+        return filename;
+      } catch (error) {
+        console.error(`Error saving ${prefix} audio samples:`, error);
+        return null;
+      }
+    };
+
+    // Function to process incoming audio data
+    const processIncomingAudio = (audioData) => {
+      // This function processes the incoming audio data
+      console.log("Processing incoming audio data, length:", audioData.length);
+      
+      // Collect audio samples for analysis
+      if (incomingSampleCount < MAX_SAMPLES) {
+        incomingAudioSamples.push(audioData);
+        incomingSampleCount++;
+        
+        if (incomingSampleCount === MAX_SAMPLES) {
+          console.log(`Collected ${MAX_SAMPLES} incoming audio samples, saving to file...`);
+          saveAudioSamples(incomingAudioSamples, "incoming");
+          incomingAudioSamples = [];
+        }
+      }
+    };
+
     // Handle incoming messages from client
     connection.on("message", (message) => {
       try {
@@ -683,7 +744,39 @@ fastify.register(async (fastify) => {
             // We're receiving media from the client, but we don't need to process it
             // Just log it once in a while to avoid flooding the console
             if (Math.random() < 0.01) { // Only log approximately 1% of media events
-              console.log("Received media from client");
+                console.log("Received media from client");
+                
+                // Log details about the media payload
+                try {
+                    const mediaInfo = {
+                        hasPayload: !!data.media && !!data.media.payload,
+                        payloadLength: data.media && data.media.payload ? data.media.payload.length : 0,
+                        payloadType: data.media && data.media.payload ? typeof data.media.payload : 'none',
+                        track: data.media && data.media.track ? data.media.track : 'unknown',
+                        otherKeys: Object.keys(data).filter(key => key !== 'event' && key !== 'media')
+                    };
+                    
+                    if (data.media && data.media.payload) {
+                        // Try to decode a small sample of the payload to see what it contains
+                        try {
+                            const sampleLength = Math.min(20, data.media.payload.length);
+                            const sample = data.media.payload.substring(0, sampleLength);
+                            mediaInfo.payloadSample = sample + (sampleLength < data.media.payload.length ? '...' : '');
+                            
+                            // Process the audio data (for analysis)
+                            if (incomingSampleCount < MAX_SAMPLES) {
+                                const audioBuffer = Buffer.from(data.media.payload, 'base64');
+                                processIncomingAudio(audioBuffer);
+                            }
+                        } catch (e) {
+                            mediaInfo.payloadSample = 'Error getting sample';
+                        }
+                    }
+                    
+                    console.log("Media details:", JSON.stringify(mediaInfo, null, 2));
+                } catch (error) {
+                    console.error("Error analyzing media data:", error);
+                }
             }
             break;
           case "text":
