@@ -224,7 +224,7 @@ fastify.register(async (fastify) => {
       clearInterval(activityCheckInterval);
 
       try {
-        if (sttConnection?.getReadyState() === "open") {
+        if (sttConnection?.getReadyState() === 1) {
           sttConnection.finish();
           logger.debug("Deepgram connection closed");
         }
@@ -233,8 +233,8 @@ fastify.register(async (fastify) => {
       }
 
       try {
-        if (connection.socket.readyState === WebSocket.OPEN) {
-          connection.socket.close();
+        if (connection.readyState === WebSocket.OPEN) {
+          connection.close();
           logger.debug("WebSocket connection closed");
         }
       } catch (error) {
@@ -255,8 +255,10 @@ fastify.register(async (fastify) => {
           encoding: "mulaw",
           sample_rate: 8000,
           channels: 1,
-          interim_results: false,
-          endpointing: 300,
+          interim_results: true, // Enable to get partial results
+          endpointing: 500, // Wait for 500ms of silence
+          utterance_end_ms: "1000", // Send utterance end event after 1000ms of no transcribed words
+          punctuate: true, // Add punctuation to help identify sentence boundaries
         });
 
         sttConnection.on(LiveTranscriptionEvents.Open, () => {
@@ -265,8 +267,13 @@ fastify.register(async (fastify) => {
         });
 
         sttConnection.on(LiveTranscriptionEvents.Close, (event) => {
-          logger.info(`Deepgram connection closed: ${event.reason}`);
-          safeClose();
+          logger.info(`Deepgram connection closed: ${event}`);
+
+          // Only attempt reconnect if not intentionally closing
+          if (!isClosing) {
+            logger.info("Attempting to reconnect to Deepgram...");
+            setTimeout(initSTT, 2000); // Reconnect after 2 seconds
+          }
         });
 
         sttConnection.on(LiveTranscriptionEvents.Error, (error) => {
@@ -274,17 +281,60 @@ fastify.register(async (fastify) => {
           safeClose();
         });
 
+        let currentTranscript = ""; // Track current transcript being built
+
+        // Add handler for utterance end events
+        sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+          logger.info("Utterance end detected");
+          // Process the complete utterance if we have content
+          if (currentTranscript.trim()) {
+            logger.info(
+              `Processing complete utterance: "${currentTranscript}"`
+            );
+            processTranscript(currentTranscript);
+            currentTranscript = ""; // Reset for next utterance
+          }
+        });
+
         sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
           try {
             resetActivityTimer();
             const text = data.channel.alternatives[0]?.transcript;
-            if (!text?.trim()) {
-              logger.debug("Received empty transcript");
+            const confidence = data.channel.alternatives[0]?.confidence || 0;
+
+            // Ignore empty transcripts or low confidence results
+            console.log("🚀 ~ confidence:", confidence);
+            if (!text?.trim() || confidence < 0.1) {
+              logger.debug(
+                `Ignored low quality transcript (${confidence}): "${text}"`
+              );
               return;
             }
 
-            logger.info(`STT Result: "${text}"`);
+            if (data.speech_final) {
+              logger.info(`Speech final detected: "${text}"`);
+              processTranscript(text);
+            } else if (data.is_final) {
+              // This is a final segment but not end of speech
+              currentTranscript += text + " ";
+              logger.debug(`Building transcript: "${currentTranscript}"`);
+            }
+          } catch (error) {
+            logger.error(`Processing error: ${error.message}`);
+            if (error.response) {
+              logger.debug(
+                `API Error Details: ${JSON.stringify(error.response.data)}`
+              );
+            }
+            safeClose();
+          }
+        });
 
+        // Helper function to process complete transcripts
+        async function processTranscript(text) {
+          logger.info(`Processing transcript: "${text}"`);
+
+          try {
             // Process with Groq
             logger.debug("Sending to Groq...");
             const llmResponse = await axios.post(
@@ -350,32 +400,34 @@ fastify.register(async (fastify) => {
                 `API Error Details: ${JSON.stringify(error.response.data)}`
               );
             }
-            safeClose();
           }
-        });
+        }
       } catch (error) {
         logger.error(`STT Initialization failed: ${error.message}`);
         safeClose();
       }
     };
-
+    initSTT();
     // Handle Telnyx media
     connection.on("message", (message) => {
-      console.log("============================");
-      console.log("🚀 ~ connection.socket.on ~ message:", message);
       try {
         resetActivityTimer();
         const data = JSON.parse(message);
-        console.log("🚀 ~ connection.socket.on ~ data:", data);
+
         if (data.event === "media") {
-          logger.debug("Received audio chunk");
-          if (!sttConnection || sttConnection.getReadyState() !== "open") {
-            initSTT();
-          }
+          // logger.debug("Received audio chunk");
+          // if (!sttConnection || sttConnection.getReadyState() !== "open") {
+          //   initSTT();
+          // }
 
           try {
-            const audioChunk = Buffer.from(data.media.payload, "base64");
-            sttConnection.send(audioChunk);
+            // Check if connection is ready before sending
+            if (sttConnection && sttConnection.getReadyState() === 1) {
+              const audioChunk = Buffer.from(data.media.payload, "base64");
+              sttConnection.send(audioChunk);
+            } else {
+              logger.error("Deepgram connection not ready");
+            }
           } catch (error) {
             logger.error(`Error sending to Deepgram: ${error.message}`);
             safeClose();
