@@ -249,16 +249,17 @@ fastify.register(async (fastify) => {
       try {
         logger.debug("Initializing Deepgram STT connection");
         sttConnection = deepgram.listen.live({
-          model: "nova-2",
+          model: "nova-2-phonecall", // Better for phone call audio
           language: "en-US",
           smart_format: true,
           encoding: "mulaw",
           sample_rate: 8000,
           channels: 1,
-          interim_results: true, // Enable to get partial results
-          endpointing: 500, // Wait for 500ms of silence
-          utterance_end_ms: "1000", // Send utterance end event after 1000ms of no transcribed words
-          punctuate: true, // Add punctuation to help identify sentence boundaries
+          interim_results: true,
+          endpointing: 300, // Slightly lower value for more responsive interactions
+          utterance_end_ms: "1500", // Slightly higher for natural conversation pauses
+          punctuate: true,
+          vad_events: true, // Voice activity detection events
         });
 
         sttConnection.on(LiveTranscriptionEvents.Open, () => {
@@ -284,17 +285,17 @@ fastify.register(async (fastify) => {
         let currentTranscript = ""; // Track current transcript being built
 
         // Add handler for utterance end events
-        sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
-          logger.info("Utterance end detected");
-          // Process the complete utterance if we have content
-          if (currentTranscript.trim()) {
-            logger.info(
-              `Processing complete utterance: "${currentTranscript}"`
-            );
-            processTranscript(currentTranscript);
-            currentTranscript = ""; // Reset for next utterance
-          }
-        });
+        // sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+        //   logger.info("Utterance end detected");
+        //   // Process the complete utterance if we have content
+        //   if (currentTranscript.trim()) {
+        //     logger.info(
+        //       `Processing complete utterance: "${currentTranscript}"`
+        //     );
+        //     processTranscript(currentTranscript);
+        //     currentTranscript = ""; // Reset for next utterance
+        //   }
+        // });
 
         sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
           try {
