@@ -417,7 +417,7 @@ fastify.register(async (fastify) => {
 
         if (data.event === "media") {
           // logger.debug("Received audio chunk");
-          // if (!sttConnection || sttConnection.getReadyState() !== "open") {
+          // if (!sttConnection || sttConnection.getReadyState() !== 1)  {
           //   initSTT();
           // }
 
