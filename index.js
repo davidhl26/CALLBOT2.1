@@ -5,6 +5,7 @@ import fastifyWs from "@fastify/websocket";
 import axios from "axios";
 import dotenv from "dotenv";
 import Fastify from "fastify";
+import Groq from "groq-sdk";
 import { v4 as uuidv4 } from "uuid";
 import WebSocket from "ws";
 import sequelize from "./config/sequelize.js";
@@ -298,6 +299,7 @@ fastify.register(async (fastify) => {
         // });
 
         sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
+          // processTranscript("Hello, how are you?");
           try {
             resetActivityTimer();
             const text = data.channel.alternatives[0]?.transcript;
@@ -321,10 +323,12 @@ fastify.register(async (fastify) => {
               logger.debug(`Building transcript: "${currentTranscript}"`);
             }
           } catch (error) {
-            logger.error(`Processing error: ${error.message}`);
+            logger.error(`Processing transcript error: ${error.message}`);
             if (error.response) {
               logger.debug(
-                `API Error Details: ${JSON.stringify(error.response.data)}`
+                ` Deepgram STT API Error Details: ${JSON.stringify(
+                  error.response.data
+                )}`
               );
             }
             safeClose();
@@ -332,33 +336,30 @@ fastify.register(async (fastify) => {
         });
 
         // Helper function to process complete transcripts
-        async function processTranscript(text) {
+        async function processTranscript(
+          text = "Tell me about artificial intelligence"
+        ) {
           logger.info(`Processing transcript: "${text}"`);
 
           try {
-            // Process with Groq
-            logger.debug("Sending to Groq...");
-            const llmResponse = await axios.post(
-              "https://api.groq.com/v1/chat/completions",
-              {
-                model: "mixtral-8x7b-32768",
-                messages: [
-                  { role: "system", content: SYSTEM_MESSAGE },
-                  { role: "user", content: text },
-                ],
-                temperature: 0.7,
-                max_tokens: 150,
-              },
-              {
-                headers: {
-                  Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-                  "Content-Type": "application/json",
-                },
-                timeout: 5000, // 5-second timeout
-              }
-            );
+            // Initialize Groq SDK
+            const groq = new Groq({
+              apiKey: process.env.GROQ_API_KEY,
+            });
 
-            const responseText = llmResponse.data.choices[0]?.message?.content;
+            // Process with Groq using SDK
+            logger.debug("Sending to Groq...");
+            const llmResponse = await groq.chat.completions.create({
+              model: "mixtral-8x7b-32768",
+              messages: [
+                { role: "system", content: SYSTEM_MESSAGE },
+                { role: "user", content: text },
+              ],
+              temperature: 0.7,
+              max_completion_tokens: 1024,
+            });
+
+            const responseText = llmResponse.choices[0]?.message?.content;
             if (!responseText) {
               logger.error("Empty response from Groq");
               return;
@@ -373,9 +374,10 @@ fastify.register(async (fastify) => {
               {
                 text: responseText,
                 model: "aura-asteria-en",
-                encoding: "linear16",
-                container: "wav",
-                sample_rate: 8000, // Match Telnyx requirements
+                encoding: "mulaw", // Use mulaw encoding for compatibility with g711_ulaw
+                sample_rate: 8000, // Use 8kHz sample rate for telephony
+                container: "none", // No container format for raw audio
+                volume: 2.0, // Increase volume (default is 1.0)
               },
               {
                 headers: {
@@ -395,10 +397,12 @@ fastify.register(async (fastify) => {
               logger.error("WebSocket closed before TTS could be sent");
             }
           } catch (error) {
-            logger.error(`Processing error: ${error.message}`);
+            logger.error(`Processing TTS error: ${error.message}`);
             if (error.response) {
               logger.debug(
-                `API Error Details: ${JSON.stringify(error.response.data)}`
+                ` Deepgram TTS API Error Details: ${JSON.stringify(
+                  error.response.data
+                )}`
               );
             }
           }
