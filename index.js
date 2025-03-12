@@ -181,11 +181,17 @@ fastify.all("/outbound-call-handler", async (request, reply) => {
 // Generate a unique session ID for tracking
 const generateSessionId = () => uuidv4().substring(0, 8);
 
+// Replace your entire WebSocket handler with this implementation
 fastify.register(async (fastify) => {
   fastify.get("/media-stream2", { websocket: true }, (connection, req) => {
     const sessionId = generateSessionId();
     let lastActivity = Date.now();
     let isClosing = false;
+    let lastStreamId = null;
+    let deepgramReady = false;
+    let lastConnectionAttempt = 0;
+    let audioQueue = []; // Queue to store audio chunks before Deepgram is ready
+    const MAX_QUEUE_SIZE = 50; // Limit queue size to prevent memory issues
 
     const logger = {
       info: (message) => console.log(`[${sessionId}] ${message}`),
@@ -194,10 +200,9 @@ fastify.register(async (fastify) => {
     };
 
     logger.info("New WebSocket connection established");
+    logger.debug(`Telnyx connection properties: ${Object.keys(connection).join(', ')}`);
 
     const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
-    // console.log("🚀 ~ deepgram:", deepgram);
-    // console.log("🚀 ~ deepgram:", process.env.DEEPGRAM_API_KEY);
     let sttConnection;
     let activityCheckInterval;
 
@@ -207,7 +212,6 @@ fastify.register(async (fastify) => {
       if (!activityCheckInterval) {
         activityCheckInterval = setInterval(() => {
           if (Date.now() - lastActivity > 30000) {
-            // 30s timeout
             logger.error("Inactivity timeout - closing connection");
             safeClose();
           }
@@ -220,12 +224,15 @@ fastify.register(async (fastify) => {
       isClosing = true;
 
       logger.info("Starting graceful shutdown");
-
       clearInterval(activityCheckInterval);
 
       try {
-        if (sttConnection?.getReadyState() === "open") {
-          sttConnection.finish();
+        if (sttConnection) {
+          try {
+            sttConnection.finish();
+          } catch (e) {
+            // Ignore finish errors
+          }
           logger.debug("Deepgram connection closed");
         }
       } catch (error) {
@@ -233,10 +240,12 @@ fastify.register(async (fastify) => {
       }
 
       try {
-        if (connection.socket.readyState === WebSocket.OPEN) {
+        if (connection.socket && connection.socket.readyState === WebSocket.OPEN) {
           connection.socket.close();
-          logger.debug("WebSocket connection closed");
+        } else if (connection.readyState === WebSocket.OPEN) {
+          connection.close();
         }
+        logger.debug("WebSocket connection closed");
       } catch (error) {
         logger.error("Error closing WebSocket: " + error.message);
       }
@@ -244,34 +253,94 @@ fastify.register(async (fastify) => {
       logger.info("Connection fully closed");
     };
 
-    // Initialize Deepgram STT with retry logic
-    const initSTT = () => {
+    // Send message to Telnyx with fallback options
+    const sendToTelnyx = (message) => {
       try {
-        logger.debug("Initializing Deepgram STT connection");
+        if (typeof message !== 'string') {
+          message = JSON.stringify(message);
+        }
+
+        // Try different ways to send, based on the connection structure
+        if (connection.socket && typeof connection.socket.send === 'function') {
+          connection.socket.send(message);
+          return true;
+        } else if (typeof connection.send === 'function') {
+          connection.send(message);
+          return true;
+        }
+        
+        logger.error("No valid send method found");
+        return false;
+      } catch (error) {
+        logger.error(`Error sending to Telnyx: ${error.message}`);
+        return false;
+      }
+    };
+
+    // Initialize Deepgram STT
+    const initSTT = () => {
+      // Prevent rapid reconnections
+      const now = Date.now();
+      if (now - lastConnectionAttempt < 2000) {
+        logger.debug("Throttling Deepgram connection attempts");
+        return false;
+      }
+      
+      lastConnectionAttempt = now;
+      deepgramReady = false;
+      
+      try {
+        // Close existing connection if any
+        if (sttConnection) {
+          try {
+            sttConnection.finish();
+          } catch (e) {
+            // Ignore finish errors
+          }
+          sttConnection = null;
+        }
+
+        logger.info("Initializing Deepgram STT connection");
+        
+        // Create new connection with correct parameters
         sttConnection = deepgram.listen.live({
           model: "nova-2",
           language: "en-US",
           smart_format: true,
-          encoding: "mulaw",
-          sample_rate: 8000,
-          channels: 1,
+          encoding: "alaw",      // Telnyx uses PCMA which is a-law
+          sample_rate: 8000,     // Standard telephony rate
+          channels: 1,           // Mono audio
           interim_results: false,
           endpointing: 300,
         });
 
+        // Set up event handlers
         sttConnection.on(LiveTranscriptionEvents.Open, () => {
-          logger.info("Deepgram connection established");
-          resetActivityTimer();
+          logger.info("✅ Deepgram connection established successfully");
+          deepgramReady = true;
+          
+          // Process any queued audio
+          processAudioQueue();
         });
 
         sttConnection.on(LiveTranscriptionEvents.Close, (event) => {
-          logger.info(`Deepgram connection closed: ${event.reason}`);
-          safeClose();
+          logger.info(`Deepgram connection closed: ${event?.reason || 'No reason provided'}`);
+          deepgramReady = false;
+          sttConnection = null;
         });
 
         sttConnection.on(LiveTranscriptionEvents.Error, (error) => {
           logger.error(`Deepgram error: ${error.message}`);
-          safeClose();
+          deepgramReady = false;
+          sttConnection = null;
+          
+          // Try to reconnect after a delay if this was a connection error
+          setTimeout(() => {
+            if (!isClosing && !deepgramReady) {
+              logger.info("Attempting to reconnect to Deepgram after error");
+              initSTT();
+            }
+          }, 5000);
         });
 
         sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
@@ -283,113 +352,254 @@ fastify.register(async (fastify) => {
               return;
             }
 
-            logger.info(`STT Result: "${text}"`);
+            logger.info(`🎤 STT Result: "${text}"`);
 
-            // Process with Groq
-            logger.debug("Sending to Groq...");
-            const llmResponse = await axios.post(
-              "https://api.groq.com/v1/chat/completions",
-              {
-                model: "mixtral-8x7b-32768",
-                messages: [
-                  { role: "system", content: SYSTEM_MESSAGE },
-                  { role: "user", content: text },
-                ],
-                temperature: 0.7,
-                max_tokens: 150,
-              },
-              {
-                headers: {
-                  Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-                  "Content-Type": "application/json",
+            try {
+              // Process with Groq
+              logger.debug("Sending to Groq...");
+              const llmResponse = await axios.post(
+                "https://api.groq.com/v1/chat/completions",
+                {
+                  model: "mixtral-8x7b-32768",
+                  messages: [
+                    { role: "system", content: SYSTEM_MESSAGE },
+                    { role: "user", content: text },
+                  ],
+                  temperature: 0.7,
+                  max_tokens: 150,
                 },
-                timeout: 5000, // 5-second timeout
+                {
+                  headers: {
+                    Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+                    "Content-Type": "application/json",
+                  },
+                  timeout: 5000,
+                }
+              );
+      
+              const responseText = llmResponse.data.choices[0]?.message?.content;
+              if (!responseText) {
+                logger.error("Empty response from Groq");
+                return;
               }
-            );
-
-            const responseText = llmResponse.data.choices[0]?.message?.content;
-            if (!responseText) {
-              logger.error("Empty response from Groq");
-              return;
-            }
-
-            logger.info(`LLM Response: "${responseText}"`);
-
-            // Convert response to speech
-            logger.debug("Generating TTS...");
-            const ttsResponse = await axios.post(
-              "https://api.deepgram.com/v1/speak",
-              {
-                text: responseText,
-                model: "aura-asteria-en",
-                encoding: "linear16",
-                container: "wav",
-                sample_rate: 8000, // Match Telnyx requirements
-              },
-              {
-                headers: {
-                  Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
-                  "Content-Type": "application/json",
+      
+              logger.info(`🤖 LLM Response: "${responseText}"`);
+              
+              // Convert response to speech
+              logger.debug("Generating TTS...");
+              const ttsResponse = await axios.post(
+                "https://api.deepgram.com/v1/speak",
+                {
+                  text: responseText,
+                  model: "aura-asteria-en",  
+                  encoding: "alaw",
+                  sample_rate: 8000,
                 },
-                responseType: "arraybuffer",
-                timeout: 5000, // 5-second timeout
+                {
+                  headers: {
+                    Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
+                    "Content-Type": "application/json",
+                  },
+                  responseType: "arraybuffer",
+                  timeout: 5000,
+                }
+              );
+    
+              logger.debug(`📣 TTS audio generated: ${ttsResponse.data.byteLength} bytes`);
+    
+              // Send audio back to Telnyx
+              const messageToSend = {
+                event: "media",
+                stream_id: lastStreamId,
+                media: {
+                  payload: Buffer.from(ttsResponse.data).toString('base64'),
+                  track: "inbound"
+                }
+              };
+              
+              const sent = sendToTelnyx(messageToSend);
+              if (sent) {
+                logger.info("✅ Sent TTS audio to Telnyx");
               }
-            );
-
-            // Send audio back to Telnyx
-            if (connection.socket.readyState === WebSocket.OPEN) {
-              connection.socket.send(Buffer.from(ttsResponse.data));
-              logger.debug("Sent TTS audio to Telnyx");
-            } else {
-              logger.error("WebSocket closed before TTS could be sent");
+            } catch (error) {
+              logger.error(`TTS/Send error: ${error.message}`);
+              if (error.response) {
+                logger.debug(`API Error Details: ${JSON.stringify(error.response.data)}`);
+              }
             }
           } catch (error) {
-            logger.error(`Processing error: ${error.message}`);
-            if (error.response) {
-              logger.debug(
-                `API Error Details: ${JSON.stringify(error.response.data)}`
-              );
-            }
-            safeClose();
+            logger.error(`Transcript processing error: ${error.message}`);
           }
         });
+
+        return true;
       } catch (error) {
         logger.error(`STT Initialization failed: ${error.message}`);
-        safeClose();
+        logger.debug(`Stack trace: ${error.stack}`);
+        deepgramReady = false;
+        sttConnection = null;
+        return false;
       }
     };
 
-    // Handle Telnyx media
-    connection.on("message", (message) => {
-      console.log("============================");
-      console.log("🚀 ~ connection.socket.on ~ message:", message);
+    // Process any audio chunks that were queued while waiting for Deepgram
+    const processAudioQueue = () => {
+      if (!deepgramReady || !sttConnection) return;
+      
+      logger.info(`Processing ${audioQueue.length} queued audio chunks`);
+      
+      while (audioQueue.length > 0 && deepgramReady) {
+        const chunk = audioQueue.shift();
+        try {
+          sttConnection.send(chunk);
+        } catch (e) {
+          logger.error(`Error sending queued chunk: ${e.message}`);
+          break;
+        }
+      }
+    };
+
+    // Function to generate and send a test audio message
+    const sendTestAudio = async () => {
+      try {
+        if (!lastStreamId) {
+          logger.error("Cannot send test audio - no stream_id available");
+          return false;
+        }
+        
+        const testText = "Hello, I can hear you now. This is a test response to verify the audio connection.";
+        logger.info(`🔍 Sending test TTS with text: "${testText}"`);
+        
+        const ttsResponse = await axios.post(
+          "https://api.deepgram.com/v1/speak",
+          {
+            text: testText,
+            model: "aura-asteria-en",
+            encoding: "alaw",
+            sample_rate: 8000,
+          },
+          {
+            headers: {
+              Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            responseType: "arraybuffer",
+            timeout: 5000,
+          }
+        );
+        
+        logger.debug(`📣 Test TTS audio generated: ${ttsResponse.data.byteLength} bytes`);
+        
+        const messageToSend = {
+          event: "media",
+          stream_id: lastStreamId,
+          media: {
+            payload: Buffer.from(ttsResponse.data).toString('base64'),
+            track: "inbound"
+          }
+        };
+        
+        const sent = sendToTelnyx(messageToSend);
+        if (sent) {
+          logger.info("✅ Sent TEST audio to Telnyx");
+          return true;
+        } else {
+          logger.error("Failed to send test audio");
+          return false;
+        }
+      } catch (error) {
+        logger.error(`Test audio error: ${error.message}`);
+        return false;
+      }
+    };
+
+    // Handle Telnyx messages
+    connection.on("message", async (message) => {
       try {
         resetActivityTimer();
+        
+        // Parse message
         const data = JSON.parse(message);
-        console.log("🚀 ~ connection.socket.on ~ data:", data);
-        if (data.event === "media") {
-          logger.debug("Received audio chunk");
-          if (!sttConnection || sttConnection.getReadyState() !== "open") {
+        logger.debug(`Received message type: ${data.event}`);
+        
+        // Store the stream_id when available
+        if (data.stream_id) {
+          lastStreamId = data.stream_id;
+          
+          // If this is the start event, initialize Deepgram and send test audio
+          if (data.event === "start") {
+            logger.info("Call started - initializing Deepgram and scheduling test audio");
+            
+            // Initialize Deepgram
             initSTT();
+            
+            // Schedule test audio after a short delay
+            setTimeout(async () => {
+              try {
+                await sendTestAudio();
+              } catch (error) {
+                logger.error(`Error sending initial test audio: ${error.message}`);
+              }
+            }, 2000);
           }
-
+        }
+        
+        // Handle media specifically
+        if (data.event === "media") {
           try {
+            // Decode the audio data
             const audioChunk = Buffer.from(data.media.payload, "base64");
-            sttConnection.send(audioChunk);
+            logger.debug(`Received audio chunk: ${audioChunk.length} bytes`);
+            
+            // If Deepgram is ready, send directly
+            if (deepgramReady && sttConnection) {
+              try {
+                sttConnection.send(audioChunk);
+              } catch (e) {
+                logger.error(`Error sending to Deepgram: ${e.message}`);
+                deepgramReady = false;
+                
+                // Queue this chunk and try to reconnect
+                audioQueue.push(audioChunk);
+                initSTT();
+              }
+            } 
+            // Otherwise, initialize if needed and queue the audio
+            else {
+              // Queue the audio (with a limit to prevent memory issues)
+              if (audioQueue.length < MAX_QUEUE_SIZE) {
+                audioQueue.push(audioChunk);
+              }
+              
+              // Try to initialize Deepgram if not already in progress
+              if (!sttConnection) {
+                initSTT();
+              }
+            }
           } catch (error) {
-            logger.error(`Error sending to Deepgram: ${error.message}`);
-            safeClose();
+            logger.error(`Error processing audio: ${error.message}`);
           }
         }
       } catch (error) {
         logger.error(`Message handling error: ${error.message}`);
-        safeClose();
       }
     });
 
+    // Send another test message after a longer delay in case initial one fails
+    setTimeout(async () => {
+      try {
+        if (lastStreamId && !isClosing) {
+          logger.info("Sending follow-up test audio");
+          await sendTestAudio();
+        }
+      } catch (error) {
+        logger.error(`Error in follow-up test audio: ${error.message}`);
+      }
+    }, 10000);
+
     // Handle connection close
     connection.on("close", (code, reason) => {
-      logger.info(`WebSocket closed (${code}) - ${reason.toString()}`);
+      logger.info(`WebSocket closed (${code}) - ${reason?.toString() || 'No reason provided'}`);
       safeClose();
     });
 
@@ -400,13 +610,14 @@ fastify.register(async (fastify) => {
 
     // Send periodic keep-alive messages
     const keepAliveInterval = setInterval(() => {
-      if (connection.readyState === WebSocket.OPEN) {
-        try {
-          connection.send(JSON.stringify({ event: "keepalive" }));
+      try {
+        if (!isClosing) {
+          const keepAliveMsg = { event: "keepalive", timestamp: Date.now() };
+          sendToTelnyx(keepAliveMsg);
           logger.debug("Sent keep-alive message");
-        } catch (error) {
-          logger.error("Keep-alive failed: " + error.message);
         }
+      } catch (error) {
+        logger.error(`Keep-alive failed: ${error.message}`);
       }
     }, 15000); // Every 15 seconds
 
@@ -414,6 +625,9 @@ fastify.register(async (fastify) => {
     connection.on("close", () => {
       clearInterval(keepAliveInterval);
     });
+
+    // Log initial connection
+    resetActivityTimer();
   });
 });
 // ... existing code ...
