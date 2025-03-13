@@ -1,4 +1,8 @@
-import { createClient, LiveTranscriptionEvents } from "@deepgram/sdk";
+import {
+  createClient,
+  LiveTranscriptionEvents,
+  LiveTTSEvents,
+} from "@deepgram/sdk";
 import fastifyCors from "@fastify/cors";
 import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
@@ -200,6 +204,7 @@ fastify.register(async (fastify) => {
     // console.log("🚀 ~ deepgram:", deepgram);
     // console.log("🚀 ~ deepgram:", process.env.DEEPGRAM_API_KEY);
     let sttConnection;
+    let ttsConnection;
     let activityCheckInterval;
 
     // Activity monitoring to prevent automatic disconnects
@@ -248,23 +253,91 @@ fastify.register(async (fastify) => {
     // Initialize Deepgram STT with retry logic
     const initSTT = () => {
       try {
+        // Initialize TTS connection first
+        logger.debug("Initializing Deepgram TTS connection");
+        ttsConnection = deepgram.speak.live({
+          model: "aura-asteria-en",
+          voice: "male",
+          encoding: "mulaw",
+          sample_rate: 8000,
+          container: "none",
+          volume: 2.0,
+        });
+
+        // Set up TTS event handlers immediately
+        ttsConnection.on(LiveTTSEvents.Open, () => {
+          logger.info("Deepgram TTS connection established");
+        });
+
+        ttsConnection.on(LiveTTSEvents.Audio, (data) => {
+          if (!data || data.length === 0) {
+            logger.debug("Received empty audio data, skipping");
+            return;
+          }
+
+          try {
+            // Convert the audio data to base64 for sending to client
+            const buffer = Buffer.from(data);
+            const base64Data = buffer.toString("base64");
+
+            // Format the audio data for Telnyx
+            const audioDelta = {
+              event: "media",
+              media: {
+                payload: base64Data,
+              },
+            };
+
+            if (connection.readyState === WebSocket.OPEN) {
+              connection.send(JSON.stringify(audioDelta));
+              logger.debug("Sent TTS audio to Telnyx");
+            } else {
+              logger.error("WebSocket closed before TTS could be sent");
+            }
+          } catch (error) {
+            logger.error("Error processing TTS audio data:", error);
+          }
+        });
+
+        // Handle Deepgram flush event
+        ttsConnection.on(LiveTTSEvents.Flushed, () => {
+          logger.info("Deepgram TTS Flushed");
+        });
+
+        // Handle Deepgram metadata event
+        ttsConnection.on(LiveTTSEvents.Metadata, (data) => {
+          logger.info("Deepgram TTS metadata received:", data);
+        });
+
+        // Handle Deepgram errors
+        ttsConnection.on(LiveTTSEvents.Error, (err) => {
+          logger.error("Deepgram TTS error:", err);
+        });
+
+        // Handle Deepgram connection close
+        ttsConnection.on(LiveTTSEvents.Close, () => {
+          logger.info("Deepgram TTS connection closed");
+        });
+
+        // Initialize STT connection
         logger.debug("Initializing Deepgram STT connection");
         sttConnection = deepgram.listen.live({
-          model: "nova-2-phonecall", // Better for phone call audio
+          model: "nova-2-phonecall",
           language: "en-US",
           smart_format: true,
           encoding: "mulaw",
           sample_rate: 8000,
           channels: 1,
           interim_results: true,
-          endpointing: 300, // Slightly lower value for more responsive interactions
-          utterance_end_ms: "1500", // Slightly higher for natural conversation pauses
+          endpointing: 300,
+          utterance_end_ms: "1500",
           punctuate: true,
-          vad_events: true, // Voice activity detection events
+          vad_events: true,
         });
 
+        // Rest of your STT event handlers...
         sttConnection.on(LiveTranscriptionEvents.Open, () => {
-          logger.info("Deepgram connection established");
+          logger.info("Deepgram STT connection established");
           resetActivityTimer();
         });
 
@@ -367,51 +440,33 @@ fastify.register(async (fastify) => {
 
             logger.info(`LLM Response: "${responseText}"`);
 
-            // Convert response to speech
-            logger.debug("Generating TTS...");
-            const ttsResponse = await axios.post(
-              "https://api.deepgram.com/v1/speak",
-              {
-                text: responseText,
-                model: "aura-asteria-en",
-                encoding: "mulaw", // Use mulaw encoding for compatibility with g711_ulaw
-                sample_rate: 8000, // Use 8kHz sample rate for telephony
-                container: "none", // No container format for raw audio
-                volume: 2.0, // Increase volume (default is 1.0)
-              },
-              {
-                headers: {
-                  Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
-                  "Content-Type": "application/json",
-                },
-                responseType: "arraybuffer",
-                timeout: 5000, // 5-second timeout
-              }
-            );
-
-            // Send audio back to Telnyx
-            if (connection.socket.readyState === WebSocket.OPEN) {
-              connection.socket.send(Buffer.from(ttsResponse.data));
-              logger.debug("Sent TTS audio to Telnyx");
+            // Send text to Deepgram TTS
+            if (ttsConnection.getReadyState() === 1) {
+              logger.debug("Sending text to Deepgram TTS");
+              ttsConnection.sendText(responseText);
+              ttsConnection.flush();
             } else {
-              logger.error("WebSocket closed before TTS could be sent");
+              logger.error(
+                "TTS connection not ready, state:",
+                ttsConnection.getReadyState()
+              );
             }
           } catch (error) {
-            logger.error(`Processing TTS error: ${error.message}`);
+            logger.error(`Processing error: ${error.message}`);
             if (error.response) {
               logger.debug(
-                ` Deepgram TTS API Error Details: ${JSON.stringify(
-                  error.response.data
-                )}`
+                `API Error Details: ${JSON.stringify(error.response.data)}`
               );
             }
           }
         }
       } catch (error) {
-        logger.error(`STT Initialization failed: ${error.message}`);
+        logger.error(`Initialization failed: ${error.message}`);
         safeClose();
       }
     };
+
+    // Start the initialization
     initSTT();
     // Handle Telnyx media
     connection.on("message", (message) => {
