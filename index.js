@@ -66,8 +66,8 @@ fastify.register(campaignRoutes, { prefix: "/api/campaigns" });
 
 // Constants
 let SYSTEM_MESSAGE =
-  "You are a voice assistant for Mary's Dental, a dental office located at 123 North Face Place, Anaheim, California. The hours are 8 AM to 5PM daily, but they are closed on Sundays.\nMary's dental provides dental services to the local Anaheim community. The practicing dentist is Dr. Mary Smith.\nYou are tasked with answering questions about the business, and booking appointments. If they wish to book an appointment, your goal is to gather necessary information from callers in a friendly and efficient manner like follows:\n1. Ask for their full name.\n2. Ask for the purpose of their appointment.\n3. Request their preferred date and time for the appointment.\n4. Confirm all details with the caller, including the date and time of the appointment.\n\n- Be sure to be kind of funny and witty!\n- Keep all your responses short and simple. Use casual language, phrases like Umm..., Well..., and I mean are preferred.\n- This is a voice conversation, so keep your responses short, like in a real conversation. Don't ramble for too long.";
-console.log("🚀 ~ SYSTEM_MESSAGE:", SYSTEM_MESSAGE);
+  "You are a voice assistant for Mary's Dental, a dental office located at 123 North Face Place, Anaheim, California. You respond with short responses like you are speaking verbally with the user. The hours are 8 AM to 5PM daily, but they are closed on Sundays.\nMary's dental provides dental services to the local Anaheim community. The practicing dentist is Dr. Mary Smith.\nYou are tasked with answering questions about the business, and booking appointments. If they wish to book an appointment, your goal is to gather necessary information from callers in a friendly and efficient manner like follows:\n1. Ask for their full name.\n2. Ask for the purpose of their appointment.\n3. Request their preferred date and time for the appointment.\n4. Confirm all details with the caller, including the date and time of the appointment.\n\n- Be sure to be kind of funny and witty!\n- Keep all your responses short and simple. Use casual language, phrases like Umm..., Well..., and I mean are preferred.\n- This is a voice conversation, so keep your responses short, like in a real conversation. Don't ramble for too long.";
+// console.log("🚀 ~ SYSTEM_MESSAGE:", SYSTEM_MESSAGE);
 const VOICE = process.env.VOICE || "alloy";
 const PORT = process.env.PORT || 8000; // Allow dynamic port assignment
 
@@ -190,32 +190,17 @@ fastify.register(async (fastify) => {
     let lastActivity = Date.now();
     let isClosing = false;
     let isCallActive = true;
-    let sttReady = false; // Track STT readiness
+    let sttReady = false;
+    let ttsReady = false;
     let audioBuffer = []; // Buffer for audio during initialization
 
-    // Conversation state management
-    const State = {
-      INITIALIZING: "initializing", // New state for initialization
-      IDLE: "idle",
-      USER_SPEAKING: "user_speaking",
-      BOT_SPEAKING: "bot_speaking",
-      PROCESSING: "processing",
-    };
-    let currentState = State.INITIALIZING; // Start in initializing state
-    let currentUtterance = "";
-    let isBotInterrupted = false;
-    let ttsReady = false;
+    // Add conversation history array
+    let conversationHistory = [{ role: "system", content: SYSTEM_MESSAGE }];
 
     const logger = {
       info: (message) => console.log(`[${sessionId}] ${message}`),
       error: (message) => console.error(`[${sessionId}] ERROR: ${message}`),
       debug: (message) => console.debug(`[${sessionId}] DEBUG: ${message}`),
-      state: (message) => console.log(`[${sessionId}] STATE: ${message}`),
-    };
-
-    const setState = (newState) => {
-      logger.state(`${currentState} -> ${newState}`);
-      currentState = newState;
     };
 
     logger.info("New WebSocket connection established");
@@ -263,7 +248,6 @@ fastify.register(async (fastify) => {
         }
       } catch (error) {
         logger.error("Error closing TTS connection: " + error.message);
-        // Just mark it as not ready if Close message fails
         ttsReady = false;
       }
 
@@ -280,26 +264,11 @@ fastify.register(async (fastify) => {
     };
 
     const stopBotResponse = () => {
-      if (
-        currentState === State.BOT_SPEAKING &&
-        ttsConnection?.getReadyState() === 1
-      ) {
-        // Set interrupted flag first to prevent any more audio chunks from being sent
-        isBotInterrupted = true;
-        setState(State.IDLE);
-
+      if (ttsConnection?.getReadyState() === 1) {
         try {
           // Send Clear to stop pending audio immediately
           ttsConnection.send(JSON.stringify({ type: "Clear" }));
-
-          // Send Flush to process any remaining audio
-          setTimeout(() => {
-            if (ttsConnection?.getReadyState() === 1) {
-              ttsConnection.send(JSON.stringify({ type: "Flush" }));
-              logger.debug("TTS stream cleared and flushed");
-            }
-          }, 10); // Small delay to ensure Clear is processed first
-
+          // ttsConnection.send(JSON.stringify({ type: "Flush" }));
           logger.info("Bot response interrupted");
         } catch (error) {
           logger.error("Error stopping TTS: " + error.message);
@@ -321,15 +290,13 @@ fastify.register(async (fastify) => {
         return;
       }
 
-      setState(State.BOT_SPEAKING);
-      isBotInterrupted = false;
       logger.debug("Sending text to Deepgram TTS");
 
       try {
         ttsConnection.sendText(text);
+        ttsConnection.flush();
       } catch (error) {
         logger.error("Error sending TTS:", error);
-        setState(State.IDLE);
       }
     };
 
@@ -357,16 +324,14 @@ fastify.register(async (fastify) => {
             resolve();
           });
 
-          // Add handlers for Clear and Flush events
-          ttsConnection.on(LiveTTSEvents.Cleared, () => {
-            logger.info("TTS stream cleared");
+          // Listen for the Cleared event
+          ttsConnection.on(LiveTTSEvents.Clear, (data) => {
+            console.log("Buffer cleared successfully", data);
+            // Now you can be sure the previous audio generation has stopped
           });
 
           ttsConnection.on(LiveTTSEvents.Flushed, () => {
             logger.info("TTS stream flushed");
-            if (currentState === State.BOT_SPEAKING) {
-              setState(State.IDLE);
-            }
           });
         });
         initPromises.push(ttsPromise);
@@ -399,7 +364,6 @@ fastify.register(async (fastify) => {
         // Wait for both connections to be ready
         Promise.all(initPromises).then(() => {
           logger.info("All Deepgram connections established");
-          setState(State.IDLE);
 
           // Process any buffered audio
           if (audioBuffer.length > 0) {
@@ -417,7 +381,7 @@ fastify.register(async (fastify) => {
 
         // Set up TTS event handlers
         ttsConnection.on(LiveTTSEvents.Audio, (data) => {
-          if (!data || data.length === 0 || isBotInterrupted || !isCallActive) {
+          if (!data || data.length === 0 || !isCallActive) {
             logger.debug(
               "Skipping audio data (empty, interrupted, or call ended)"
             );
@@ -434,60 +398,35 @@ fastify.register(async (fastify) => {
               },
             };
 
-            // Only send if not interrupted and still in BOT_SPEAKING state
-            if (
-              connection.readyState === WebSocket.OPEN &&
-              currentState === State.BOT_SPEAKING &&
-              !isBotInterrupted
-            ) {
+            // Only send if not interrupted
+            if (connection.readyState === WebSocket.OPEN) {
               connection.send(JSON.stringify(audioDelta));
               logger.debug("Sent TTS audio chunk to Telnyx");
             } else {
-              logger.debug("Skipping audio chunk due to state or interruption");
+              logger.debug("Skipping audio chunk due to interruption");
             }
           } catch (error) {
             logger.error("Error sending TTS:", error);
-            setState(State.IDLE);
           }
         });
 
         ttsConnection.on(LiveTTSEvents.Error, (err) => {
           logger.error("Deepgram TTS error:", err);
-          if (currentState === State.BOT_SPEAKING) {
-            setState(State.IDLE);
-          }
         });
 
         ttsConnection.on(LiveTTSEvents.Close, () => {
           logger.info("Deepgram TTS connection closed");
           ttsReady = false;
-          if (currentState === State.USER_SPEAKING) {
-            setState(State.IDLE);
-          }
         });
 
         // Handle speech events
         sttConnection.on(LiveTranscriptionEvents.SpeechStarted, () => {
           logger.info("Speech started");
-          if (currentState === State.BOT_SPEAKING) {
-            stopBotResponse();
-          }
-          setState(State.USER_SPEAKING);
-          currentUtterance = "";
+          stopBotResponse();
         });
 
         sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
           logger.info("Utterance ended");
-          if (currentState === State.USER_SPEAKING) {
-            setState(State.PROCESSING);
-            if (currentUtterance.trim()) {
-              logger.info(
-                `Processing complete utterance: "${currentUtterance}"`
-              );
-              processTranscript(currentUtterance);
-              currentUtterance = "";
-            }
-          }
         });
 
         sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
@@ -505,16 +444,8 @@ fastify.register(async (fastify) => {
 
             if (data.speech_final) {
               logger.info(`Speech final detected: "${text}"`);
-              if (currentState === State.USER_SPEAKING) {
-                setState(State.PROCESSING);
-                logger.debug("Processing transcript...");
-                await processTranscript(text);
-              } else {
-                logger.debug(`Skipping processing in state: ${currentState}`);
-              }
-            } else if (data.is_final) {
-              currentUtterance += text + " ";
-              logger.debug(`Building transcript: "${currentUtterance}"`);
+              logger.debug("Processing transcript...");
+              await processTranscript(text);
             }
           } catch (error) {
             logger.error(`Processing transcript error: ${error.message}`);
@@ -525,7 +456,6 @@ fastify.register(async (fastify) => {
                 )}`
               );
             }
-            setState(State.IDLE);
           }
         });
 
@@ -545,25 +475,43 @@ fastify.register(async (fastify) => {
               apiKey: process.env.GROQ_API_KEY,
             });
 
+            // Add user's message to history
+            conversationHistory.push({ role: "user", content: text });
+
+            // Keep only last 10 messages to prevent context from getting too long
+            if (conversationHistory.length > 11) {
+              // 1 system message + 10 conversation messages
+              conversationHistory = [
+                conversationHistory[0], // Keep system message
+                ...conversationHistory.slice(-10), // Keep last 10 messages
+              ];
+            }
+
             logger.debug("Sending to Groq...");
             const llmResponse = await groq.chat.completions.create({
               model: "mixtral-8x7b-32768",
-              messages: [
-                { role: "system", content: SYSTEM_MESSAGE },
-                { role: "user", content: text },
-              ],
+              messages: conversationHistory,
               temperature: 0.7,
-              max_completion_tokens: 1024,
+              max_completion_tokens: 50,
+              top_p: 0.8,
             });
 
             const responseText = llmResponse.choices[0]?.message?.content;
             if (!responseText) {
               logger.error("Empty response from Groq");
-              setState(State.IDLE);
               return;
             }
 
+            // Add assistant's response to history
+            conversationHistory.push({
+              role: "assistant",
+              content: responseText,
+            });
+
             logger.info(`LLM Response: "${responseText}"`);
+            logger.debug(
+              "Current conversation length: " + conversationHistory.length
+            );
 
             // Check if call is still active before responding
             if (!isCallActive) {
@@ -583,7 +531,6 @@ fastify.register(async (fastify) => {
                 `API Error Details: ${JSON.stringify(error.response.data)}`
               );
             }
-            setState(State.IDLE);
           }
         }
       } catch (error) {
@@ -605,11 +552,7 @@ fastify.register(async (fastify) => {
           try {
             const audioChunk = Buffer.from(data.media.payload, "base64");
 
-            if (currentState === State.INITIALIZING || !sttReady) {
-              // Buffer audio during initialization
-              audioBuffer.push(audioChunk);
-              logger.debug("Buffering audio chunk during initialization");
-            } else if (sttConnection && sttConnection.getReadyState() === 1) {
+            if (sttReady) {
               // Send audio directly when ready
               sttConnection.send(audioChunk);
             } else {

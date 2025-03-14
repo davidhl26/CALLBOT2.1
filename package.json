@@ -8,7 +8,9 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "dependencies": {
     "@deepgram/sdk": "^3.11.2",
@@ -30,6 +32,9 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "eslint": "^9.22.0",
+    "eslint-config-airbnb-base": "^15.0.0",
+    "eslint-plugin-import": "^2.31.0",
     "sequelize-cli": "^6.6.2"
   }
 }
