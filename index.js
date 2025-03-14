@@ -66,7 +66,7 @@ fastify.register(campaignRoutes, { prefix: "/api/campaigns" });
 
 // Constants
 let SYSTEM_MESSAGE =
-  "You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts.";
+  "You are a voice assistant for Mary's Dental, a dental office located at 123 North Face Place, Anaheim, California. The hours are 8 AM to 5PM daily, but they are closed on Sundays.\nMary's dental provides dental services to the local Anaheim community. The practicing dentist is Dr. Mary Smith.\nYou are tasked with answering questions about the business, and booking appointments. If they wish to book an appointment, your goal is to gather necessary information from callers in a friendly and efficient manner like follows:\n1. Ask for their full name.\n2. Ask for the purpose of their appointment.\n3. Request their preferred date and time for the appointment.\n4. Confirm all details with the caller, including the date and time of the appointment.\n\n- Be sure to be kind of funny and witty!\n- Keep all your responses short and simple. Use casual language, phrases like Umm..., Well..., and I mean are preferred.\n- This is a voice conversation, so keep your responses short, like in a real conversation. Don't ramble for too long.";
 console.log("🚀 ~ SYSTEM_MESSAGE:", SYSTEM_MESSAGE);
 const VOICE = process.env.VOICE || "alloy";
 const PORT = process.env.PORT || 8000; // Allow dynamic port assignment
@@ -181,8 +181,6 @@ fastify.all("/outbound-call-handler", async (request, reply) => {
   reply.type("text/xml").send(texmlResponse);
 });
 
-// ... existing code ...
-
 // Generate a unique session ID for tracking
 const generateSessionId = () => uuidv4().substring(0, 8);
 
@@ -191,18 +189,38 @@ fastify.register(async (fastify) => {
     const sessionId = generateSessionId();
     let lastActivity = Date.now();
     let isClosing = false;
+    let isCallActive = true;
+    let sttReady = false; // Track STT readiness
+    let audioBuffer = []; // Buffer for audio during initialization
+
+    // Conversation state management
+    const State = {
+      INITIALIZING: "initializing", // New state for initialization
+      IDLE: "idle",
+      USER_SPEAKING: "user_speaking",
+      BOT_SPEAKING: "bot_speaking",
+      PROCESSING: "processing",
+    };
+    let currentState = State.INITIALIZING; // Start in initializing state
+    let currentUtterance = "";
+    let isBotInterrupted = false;
+    let ttsReady = false;
 
     const logger = {
       info: (message) => console.log(`[${sessionId}] ${message}`),
       error: (message) => console.error(`[${sessionId}] ERROR: ${message}`),
       debug: (message) => console.debug(`[${sessionId}] DEBUG: ${message}`),
+      state: (message) => console.log(`[${sessionId}] STATE: ${message}`),
+    };
+
+    const setState = (newState) => {
+      logger.state(`${currentState} -> ${newState}`);
+      currentState = newState;
     };
 
     logger.info("New WebSocket connection established");
 
     const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
-    // console.log("🚀 ~ deepgram:", deepgram);
-    // console.log("🚀 ~ deepgram:", process.env.DEEPGRAM_API_KEY);
     let sttConnection;
     let ttsConnection;
     let activityCheckInterval;
@@ -213,7 +231,6 @@ fastify.register(async (fastify) => {
       if (!activityCheckInterval) {
         activityCheckInterval = setInterval(() => {
           if (Date.now() - lastActivity > 30000) {
-            // 30s timeout
             logger.error("Inactivity timeout - closing connection");
             safeClose();
           }
@@ -226,16 +243,28 @@ fastify.register(async (fastify) => {
       isClosing = true;
 
       logger.info("Starting graceful shutdown");
-
       clearInterval(activityCheckInterval);
 
       try {
         if (sttConnection?.getReadyState() === 1) {
           sttConnection.finish();
-          logger.debug("Deepgram connection closed");
+          logger.debug("Deepgram STT connection closed");
         }
       } catch (error) {
-        logger.error("Error closing Deepgram connection: " + error.message);
+        logger.error("Error closing Deepgram STT connection: " + error.message);
+      }
+
+      try {
+        if (ttsConnection?.getReadyState() === 1) {
+          // Send Close message to properly close the TTS connection
+          ttsConnection.send(JSON.stringify({ type: "Close" }));
+          ttsReady = false;
+          logger.debug("Sent Close message to TTS connection");
+        }
+      } catch (error) {
+        logger.error("Error closing TTS connection: " + error.message);
+        // Just mark it as not ready if Close message fails
+        ttsReady = false;
       }
 
       try {
@@ -250,10 +279,67 @@ fastify.register(async (fastify) => {
       logger.info("Connection fully closed");
     };
 
-    // Initialize Deepgram STT with retry logic
+    const stopBotResponse = () => {
+      if (
+        currentState === State.BOT_SPEAKING &&
+        ttsConnection?.getReadyState() === 1
+      ) {
+        // Set interrupted flag first to prevent any more audio chunks from being sent
+        isBotInterrupted = true;
+        setState(State.IDLE);
+
+        try {
+          // Send Clear to stop pending audio immediately
+          ttsConnection.send(JSON.stringify({ type: "Clear" }));
+
+          // Send Flush to process any remaining audio
+          setTimeout(() => {
+            if (ttsConnection?.getReadyState() === 1) {
+              ttsConnection.send(JSON.stringify({ type: "Flush" }));
+              logger.debug("TTS stream cleared and flushed");
+            }
+          }, 10); // Small delay to ensure Clear is processed first
+
+          logger.info("Bot response interrupted");
+        } catch (error) {
+          logger.error("Error stopping TTS: " + error.message);
+        }
+      }
+    };
+
+    // Add the sendTTSResponse function
+    const sendTTSResponse = (text) => {
+      if (!text) {
+        logger.error("Empty text for TTS");
+        return;
+      }
+
+      if (!ttsReady || ttsConnection.getReadyState() !== 1 || !isCallActive) {
+        logger.error(
+          `Cannot send TTS: ready=${ttsReady}, connection=${ttsConnection?.getReadyState()}, active=${isCallActive}`
+        );
+        return;
+      }
+
+      setState(State.BOT_SPEAKING);
+      isBotInterrupted = false;
+      logger.debug("Sending text to Deepgram TTS");
+
+      try {
+        ttsConnection.sendText(text);
+      } catch (error) {
+        logger.error("Error sending TTS:", error);
+        setState(State.IDLE);
+      }
+    };
+
+    // Initialize Deepgram connections with retry logic
     const initSTT = () => {
       try {
-        // Initialize TTS connection first
+        // Initialize both connections in parallel
+        const initPromises = [];
+
+        // Initialize TTS connection
         logger.debug("Initializing Deepgram TTS connection");
         ttsConnection = deepgram.speak.live({
           model: "aura-asteria-en",
@@ -264,60 +350,26 @@ fastify.register(async (fastify) => {
           volume: 2.0,
         });
 
-        // Set up TTS event handlers immediately
-        ttsConnection.on(LiveTTSEvents.Open, () => {
-          logger.info("Deepgram TTS connection established");
-        });
+        const ttsPromise = new Promise((resolve) => {
+          ttsConnection.on(LiveTTSEvents.Open, () => {
+            logger.info("Deepgram TTS connection established");
+            ttsReady = true;
+            resolve();
+          });
 
-        ttsConnection.on(LiveTTSEvents.Audio, (data) => {
-          if (!data || data.length === 0) {
-            logger.debug("Received empty audio data, skipping");
-            return;
-          }
+          // Add handlers for Clear and Flush events
+          ttsConnection.on(LiveTTSEvents.Cleared, () => {
+            logger.info("TTS stream cleared");
+          });
 
-          try {
-            // Convert the audio data to base64 for sending to client
-            const buffer = Buffer.from(data);
-            const base64Data = buffer.toString("base64");
-
-            // Format the audio data for Telnyx
-            const audioDelta = {
-              event: "media",
-              media: {
-                payload: base64Data,
-              },
-            };
-
-            if (connection.readyState === WebSocket.OPEN) {
-              connection.send(JSON.stringify(audioDelta));
-              logger.debug("Sent TTS audio to Telnyx");
-            } else {
-              logger.error("WebSocket closed before TTS could be sent");
+          ttsConnection.on(LiveTTSEvents.Flushed, () => {
+            logger.info("TTS stream flushed");
+            if (currentState === State.BOT_SPEAKING) {
+              setState(State.IDLE);
             }
-          } catch (error) {
-            logger.error("Error processing TTS audio data:", error);
-          }
+          });
         });
-
-        // Handle Deepgram flush event
-        ttsConnection.on(LiveTTSEvents.Flushed, () => {
-          logger.info("Deepgram TTS Flushed");
-        });
-
-        // Handle Deepgram metadata event
-        ttsConnection.on(LiveTTSEvents.Metadata, (data) => {
-          logger.info("Deepgram TTS metadata received:", data);
-        });
-
-        // Handle Deepgram errors
-        ttsConnection.on(LiveTTSEvents.Error, (err) => {
-          logger.error("Deepgram TTS error:", err);
-        });
-
-        // Handle Deepgram connection close
-        ttsConnection.on(LiveTTSEvents.Close, () => {
-          logger.info("Deepgram TTS connection closed");
-        });
+        initPromises.push(ttsPromise);
 
         // Initialize STT connection
         logger.debug("Initializing Deepgram STT connection");
@@ -330,56 +382,120 @@ fastify.register(async (fastify) => {
           channels: 1,
           interim_results: true,
           endpointing: 300,
-          utterance_end_ms: "1500",
+          utterance_end_ms: 1500,
           punctuate: true,
           vad_events: true,
         });
 
-        // Rest of your STT event handlers...
-        sttConnection.on(LiveTranscriptionEvents.Open, () => {
-          logger.info("Deepgram STT connection established");
-          resetActivityTimer();
+        const sttPromise = new Promise((resolve) => {
+          sttConnection.on(LiveTranscriptionEvents.Open, () => {
+            logger.info("Deepgram STT connection established");
+            sttReady = true;
+            resolve();
+          });
         });
+        initPromises.push(sttPromise);
 
-        sttConnection.on(LiveTranscriptionEvents.Close, (event) => {
-          logger.info(`Deepgram connection closed: ${event}`);
+        // Wait for both connections to be ready
+        Promise.all(initPromises).then(() => {
+          logger.info("All Deepgram connections established");
+          setState(State.IDLE);
 
-          // Only attempt reconnect if not intentionally closing
-          if (!isClosing) {
-            logger.info("Attempting to reconnect to Deepgram...");
-            setTimeout(initSTT, 2000); // Reconnect after 2 seconds
+          // Process any buffered audio
+          if (audioBuffer.length > 0) {
+            logger.debug(
+              `Processing ${audioBuffer.length} buffered audio chunks`
+            );
+            audioBuffer.forEach((chunk) => {
+              if (sttConnection.getReadyState() === 1) {
+                sttConnection.send(chunk);
+              }
+            });
+            audioBuffer = [];
           }
         });
 
-        sttConnection.on(LiveTranscriptionEvents.Error, (error) => {
-          logger.error(`Deepgram error: ${error.message}`);
-          safeClose();
+        // Set up TTS event handlers
+        ttsConnection.on(LiveTTSEvents.Audio, (data) => {
+          if (!data || data.length === 0 || isBotInterrupted || !isCallActive) {
+            logger.debug(
+              "Skipping audio data (empty, interrupted, or call ended)"
+            );
+            return;
+          }
+
+          try {
+            const buffer = Buffer.from(data);
+            const base64Data = buffer.toString("base64");
+            const audioDelta = {
+              event: "media",
+              media: {
+                payload: base64Data,
+              },
+            };
+
+            // Only send if not interrupted and still in BOT_SPEAKING state
+            if (
+              connection.readyState === WebSocket.OPEN &&
+              currentState === State.BOT_SPEAKING &&
+              !isBotInterrupted
+            ) {
+              connection.send(JSON.stringify(audioDelta));
+              logger.debug("Sent TTS audio chunk to Telnyx");
+            } else {
+              logger.debug("Skipping audio chunk due to state or interruption");
+            }
+          } catch (error) {
+            logger.error("Error sending TTS:", error);
+            setState(State.IDLE);
+          }
         });
 
-        let currentTranscript = ""; // Track current transcript being built
+        ttsConnection.on(LiveTTSEvents.Error, (err) => {
+          logger.error("Deepgram TTS error:", err);
+          if (currentState === State.BOT_SPEAKING) {
+            setState(State.IDLE);
+          }
+        });
 
-        // Add handler for utterance end events
-        // sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
-        //   logger.info("Utterance end detected");
-        //   // Process the complete utterance if we have content
-        //   if (currentTranscript.trim()) {
-        //     logger.info(
-        //       `Processing complete utterance: "${currentTranscript}"`
-        //     );
-        //     processTranscript(currentTranscript);
-        //     currentTranscript = ""; // Reset for next utterance
-        //   }
-        // });
+        ttsConnection.on(LiveTTSEvents.Close, () => {
+          logger.info("Deepgram TTS connection closed");
+          ttsReady = false;
+          if (currentState === State.USER_SPEAKING) {
+            setState(State.IDLE);
+          }
+        });
+
+        // Handle speech events
+        sttConnection.on(LiveTranscriptionEvents.SpeechStarted, () => {
+          logger.info("Speech started");
+          if (currentState === State.BOT_SPEAKING) {
+            stopBotResponse();
+          }
+          setState(State.USER_SPEAKING);
+          currentUtterance = "";
+        });
+
+        sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+          logger.info("Utterance ended");
+          if (currentState === State.USER_SPEAKING) {
+            setState(State.PROCESSING);
+            if (currentUtterance.trim()) {
+              logger.info(
+                `Processing complete utterance: "${currentUtterance}"`
+              );
+              processTranscript(currentUtterance);
+              currentUtterance = "";
+            }
+          }
+        });
 
         sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
-          // processTranscript("Hello, how are you?");
           try {
             resetActivityTimer();
             const text = data.channel.alternatives[0]?.transcript;
             const confidence = data.channel.alternatives[0]?.confidence || 0;
 
-            // Ignore empty transcripts or low confidence results
-            console.log("🚀 ~ confidence:", confidence);
             if (!text?.trim() || confidence < 0.1) {
               logger.debug(
                 `Ignored low quality transcript (${confidence}): "${text}"`
@@ -389,38 +505,46 @@ fastify.register(async (fastify) => {
 
             if (data.speech_final) {
               logger.info(`Speech final detected: "${text}"`);
-              processTranscript(text);
+              if (currentState === State.USER_SPEAKING) {
+                setState(State.PROCESSING);
+                logger.debug("Processing transcript...");
+                await processTranscript(text);
+              } else {
+                logger.debug(`Skipping processing in state: ${currentState}`);
+              }
             } else if (data.is_final) {
-              // This is a final segment but not end of speech
-              currentTranscript += text + " ";
-              logger.debug(`Building transcript: "${currentTranscript}"`);
+              currentUtterance += text + " ";
+              logger.debug(`Building transcript: "${currentUtterance}"`);
             }
           } catch (error) {
             logger.error(`Processing transcript error: ${error.message}`);
             if (error.response) {
               logger.debug(
-                ` Deepgram STT API Error Details: ${JSON.stringify(
+                `Deepgram STT API Error Details: ${JSON.stringify(
                   error.response.data
                 )}`
               );
             }
-            safeClose();
+            setState(State.IDLE);
           }
         });
 
         // Helper function to process complete transcripts
-        async function processTranscript(
-          text = "Tell me about artificial intelligence"
-        ) {
+        async function processTranscript(text) {
+          if (!text || !isCallActive) {
+            logger.debug(
+              `Skipping processing: text=${!!text}, callActive=${isCallActive}`
+            );
+            return;
+          }
+
           logger.info(`Processing transcript: "${text}"`);
 
           try {
-            // Initialize Groq SDK
             const groq = new Groq({
               apiKey: process.env.GROQ_API_KEY,
             });
 
-            // Process with Groq using SDK
             logger.debug("Sending to Groq...");
             const llmResponse = await groq.chat.completions.create({
               model: "mixtral-8x7b-32768",
@@ -435,22 +559,23 @@ fastify.register(async (fastify) => {
             const responseText = llmResponse.choices[0]?.message?.content;
             if (!responseText) {
               logger.error("Empty response from Groq");
+              setState(State.IDLE);
               return;
             }
 
             logger.info(`LLM Response: "${responseText}"`);
 
-            // Send text to Deepgram TTS
-            if (ttsConnection.getReadyState() === 1) {
-              logger.debug("Sending text to Deepgram TTS");
-              ttsConnection.sendText(responseText);
-              ttsConnection.flush();
-            } else {
-              logger.error(
-                "TTS connection not ready, state:",
-                ttsConnection.getReadyState()
-              );
+            // Check if call is still active before responding
+            if (!isCallActive) {
+              logger.debug("Call ended, skipping response");
+              return;
             }
+
+            // Add a small natural pause before responding
+            await new Promise((resolve) => setTimeout(resolve, 300));
+
+            // Send the response using TTS
+            sendTTSResponse(responseText);
           } catch (error) {
             logger.error(`Processing error: ${error.message}`);
             if (error.response) {
@@ -458,6 +583,7 @@ fastify.register(async (fastify) => {
                 `API Error Details: ${JSON.stringify(error.response.data)}`
               );
             }
+            setState(State.IDLE);
           }
         }
       } catch (error) {
@@ -468,6 +594,7 @@ fastify.register(async (fastify) => {
 
     // Start the initialization
     initSTT();
+
     // Handle Telnyx media
     connection.on("message", (message) => {
       try {
@@ -475,22 +602,21 @@ fastify.register(async (fastify) => {
         const data = JSON.parse(message);
 
         if (data.event === "media") {
-          // logger.debug("Received audio chunk");
-          // if (!sttConnection || sttConnection.getReadyState() !== 1)  {
-          //   initSTT();
-          // }
-
           try {
-            // Check if connection is ready before sending
-            if (sttConnection && sttConnection.getReadyState() === 1) {
-              const audioChunk = Buffer.from(data.media.payload, "base64");
+            const audioChunk = Buffer.from(data.media.payload, "base64");
+
+            if (currentState === State.INITIALIZING || !sttReady) {
+              // Buffer audio during initialization
+              audioBuffer.push(audioChunk);
+              logger.debug("Buffering audio chunk during initialization");
+            } else if (sttConnection && sttConnection.getReadyState() === 1) {
+              // Send audio directly when ready
               sttConnection.send(audioChunk);
             } else {
-              logger.error("Deepgram connection not ready");
+              logger.error("Deepgram STT connection not ready");
             }
           } catch (error) {
-            logger.error(`Error sending to Deepgram: ${error.message}`);
-            safeClose();
+            logger.error(`Error handling audio: ${error.message}`);
           }
         }
       } catch (error) {
@@ -502,6 +628,7 @@ fastify.register(async (fastify) => {
     // Handle connection close
     connection.on("close", (code, reason) => {
       logger.info(`WebSocket closed (${code}) - ${reason.toString()}`);
+      isCallActive = false; // Mark call as inactive
       safeClose();
     });
 
@@ -520,7 +647,7 @@ fastify.register(async (fastify) => {
           logger.error("Keep-alive failed: " + error.message);
         }
       }
-    }, 15000); // Every 15 seconds
+    }, 15000);
 
     // Cleanup intervals on close
     connection.on("close", () => {
@@ -528,7 +655,6 @@ fastify.register(async (fastify) => {
     });
   });
 });
-// ... existing code ...
 
 // Call status webhook handler
 fastify.post("/call-status", async (request, reply) => {
