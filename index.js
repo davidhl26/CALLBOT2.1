@@ -79,8 +79,18 @@ Speak casually, like a real person on a phone call—short and to the point.
   4. Confirm all details.
 
 💡 Example of ideal response length:
+User: "Hi"
+Assistant: "Hello, this is Mary's Dental. How can I help you today?"
 User: "What are your hours?"
 Assistant: "Oh! We're open 8 AM to 5 PM. Closed Sundays!"
+User: "What are your hours?"
+Assistant: "Oh! We're open 8 to 5. Closed Sundays!"
+User: "Can I book an appointment?"
+Assistant: "Sure! What's your name?"
+User: "I need a cleaning."
+Assistant: "Got it! When works best for you?"
+User: "Tomorrow at 10 AM."
+Assistant: "Perfect! You're all set for 10 AM tomorrow."
 `;
 // console.log("🚀 ~ SYSTEM_MESSAGE:", SYSTEM_MESSAGE);
 const VOICE = process.env.VOICE || "alloy";
@@ -208,6 +218,7 @@ fastify.register(async (fastify) => {
     let sttReady = false;
     let ttsReady = false;
     let audioBuffer = []; // Buffer for audio during initialization
+    let isUserSpeaking = false; // Track if user is speaking
 
     // Add conversation history array
     let conversationHistory = [{ role: "system", content: SYSTEM_MESSAGE }];
@@ -293,8 +304,8 @@ fastify.register(async (fastify) => {
 
     // Add the sendTTSResponse function
     const sendTTSResponse = (text) => {
-      if (!text) {
-        logger.error("Empty text for TTS");
+      if (!text || isUserSpeaking) {
+        logger.info("Skipping TTS response as user is speaking.");
         return;
       }
 
@@ -309,7 +320,7 @@ fastify.register(async (fastify) => {
 
       try {
         ttsConnection.sendText(text);
-        ttsConnection.flush();
+        ttsConnection.send(JSON.stringify({ type: "Flush" }));
       } catch (error) {
         logger.error("Error sending TTS:", error);
       }
@@ -438,10 +449,12 @@ fastify.register(async (fastify) => {
         sttConnection.on(LiveTranscriptionEvents.SpeechStarted, () => {
           logger.info("Speech started");
           stopBotResponse();
+          isUserSpeaking = true; // Block bot response
         });
 
         sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
           logger.info("Utterance ended");
+          isUserSpeaking = false; // Allow bot response
         });
 
         sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
