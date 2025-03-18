@@ -1,9 +1,16 @@
+import {
+  createClient,
+  LiveTranscriptionEvents,
+  LiveTTSEvents,
+} from "@deepgram/sdk";
 import fastifyCors from "@fastify/cors";
 import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import axios from "axios";
 import dotenv from "dotenv";
 import Fastify from "fastify";
+import Groq from "groq-sdk";
+import { v4 as uuidv4 } from "uuid";
 import WebSocket from "ws";
 import sequelize from "./config/sequelize.js";
 import Call from "./models/call.js";
@@ -13,7 +20,6 @@ import campaignRoutes from "./routes/campaigns.js";
 import contactRoutes from "./routes/contacts.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 import { handleWebhook, processCampaignBatch } from "./services/campaign.js";
-import Contact from "./models/Contact.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -59,9 +65,34 @@ fastify.register(contactRoutes);
 fastify.register(campaignRoutes, { prefix: "/api/campaigns" });
 
 // Constants
-let SYSTEM_MESSAGE =
-  "You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts.";
-console.log("🚀 ~ SYSTEM_MESSAGE:", SYSTEM_MESSAGE);
+let SYSTEM_MESSAGE = `
+You are a voice assistant for Mary's Dental, a dental office at 123 North Face Place, Anaheim, California. 
+Speak casually, like a real person on a phone call—short and to the point. 
+
+- Keep responses **brief** (1-2 sentences max).
+- Use natural conversation fillers: "Umm...", "Well...", "I mean..."
+- Be witty, but **don’t ramble**.
+- If booking an appointment, gather info step by step:
+  1. Ask for their full name.
+  2. Ask why they need the appointment.
+  3. Ask for their preferred date and time.
+  4. Confirm all details.
+
+💡 Example of ideal response length:
+User: "Hi"
+Assistant: "Hello, this is Mary's Dental. How can I help you today?"
+User: "What are your hours?"
+Assistant: "Oh! We're open 8 AM to 5 PM. Closed Sundays!"
+User: "What are your hours?"
+Assistant: "Oh! We're open 8 to 5. Closed Sundays!"
+User: "Can I book an appointment?"
+Assistant: "Sure! What's your name?"
+User: "I need a cleaning."
+Assistant: "Got it! When works best for you?"
+User: "Tomorrow at 10 AM."
+Assistant: "Perfect! You're all set for 10 AM tomorrow."
+`;
+// console.log("🚀 ~ SYSTEM_MESSAGE:", SYSTEM_MESSAGE);
 const VOICE = process.env.VOICE || "alloy";
 const PORT = process.env.PORT || 8000; // Allow dynamic port assignment
 
@@ -163,16 +194,434 @@ fastify.post("/initiate-call", async (request, reply) => {
 // TeXML handler for outbound calls
 fastify.all("/outbound-call-handler", async (request, reply) => {
   console.log("🚀 ~ fastify.all ~ request-header-host:", request.headers.host);
-  const websocketURL = `wss://${request.headers.host}/media-stream`;
+  const websocketURL = `wss://${request.headers.host}/media-stream2`;
   console.log("🚀 ~ fastify.all ~ websocket:", websocketURL);
   const texmlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                         <Response>                           
                             <Connect>
-                                <Stream url="wss://${request.headers.host}/media-stream" bidirectionalMode="rtp" />
+                                <Stream url="wss://${request.headers.host}/media-stream2" bidirectionalMode="rtp" />
                             </Connect>
                         </Response>`;
 
   reply.type("text/xml").send(texmlResponse);
+});
+
+// Generate a unique session ID for tracking
+const generateSessionId = () => uuidv4().substring(0, 8);
+
+fastify.register(async (fastify) => {
+  fastify.get("/media-stream2", { websocket: true }, (connection, req) => {
+    const sessionId = generateSessionId();
+    let lastActivity = Date.now();
+    let isClosing = false;
+    let isCallActive = true;
+    let sttReady = false;
+    let ttsReady = false;
+    let audioBuffer = []; // Buffer for audio during initialization
+
+    // Add conversation history array
+    let conversationHistory = [{ role: "system", content: SYSTEM_MESSAGE }];
+
+    const logger = {
+      info: (message) => console.log(`[${sessionId}] ${message}`),
+      error: (message) => console.error(`[${sessionId}] ERROR: ${message}`),
+      debug: (message) => console.debug(`[${sessionId}] DEBUG: ${message}`),
+    };
+
+    logger.info("New WebSocket connection established");
+
+    const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+    let sttConnection;
+    let ttsConnection;
+    let activityCheckInterval;
+
+    // Activity monitoring to prevent automatic disconnects
+    const resetActivityTimer = () => {
+      lastActivity = Date.now();
+      if (!activityCheckInterval) {
+        activityCheckInterval = setInterval(() => {
+          if (Date.now() - lastActivity > 30000) {
+            logger.error("Inactivity timeout - closing connection");
+            safeClose();
+          }
+        }, 5000);
+      }
+    };
+
+    const safeClose = () => {
+      if (isClosing) return;
+      isClosing = true;
+
+      logger.info("Starting graceful shutdown");
+      clearInterval(activityCheckInterval);
+
+      try {
+        if (sttConnection?.getReadyState() === 1) {
+          sttConnection.finish();
+          logger.debug("Deepgram STT connection closed");
+        }
+      } catch (error) {
+        logger.error("Error closing Deepgram STT connection: " + error.message);
+      }
+
+      try {
+        if (ttsConnection?.getReadyState() === 1) {
+          // Send Close message to properly close the TTS connection
+          ttsConnection.send(JSON.stringify({ type: "Close" }));
+          ttsReady = false;
+          logger.debug("Sent Close message to TTS connection");
+        }
+      } catch (error) {
+        logger.error("Error closing TTS connection: " + error.message);
+        ttsReady = false;
+      }
+
+      try {
+        if (connection.readyState === WebSocket.OPEN) {
+          connection.close();
+          logger.debug("WebSocket connection closed");
+        }
+      } catch (error) {
+        logger.error("Error closing WebSocket: " + error.message);
+      }
+
+      logger.info("Connection fully closed");
+    };
+
+    const stopBotResponse = () => {
+      if (ttsConnection?.getReadyState() === 1) {
+        try {
+          // Send Clear to stop pending audio immediately
+          ttsConnection.send(JSON.stringify({ type: "Clear" }));
+          // ttsConnection.send(JSON.stringify({ type: "Flush" }));
+          logger.info("Bot response interrupted");
+        } catch (error) {
+          logger.error("Error stopping TTS: " + error.message);
+        }
+      }
+    };
+
+    // Add the sendTTSResponse function
+    const sendTTSResponse = (text) => {
+      if (!text) {
+        logger.info("Skipping TTS response as user is speaking.");
+        return;
+      }
+
+      if (!ttsReady || ttsConnection.getReadyState() !== 1 || !isCallActive) {
+        logger.error(
+          `Cannot send TTS: ready=${ttsReady}, connection=${ttsConnection?.getReadyState()}, active=${isCallActive}`
+        );
+        return;
+      }
+
+      logger.debug("Sending text to Deepgram TTS");
+
+      try {
+        ttsConnection.sendText(text);
+        ttsConnection.send(JSON.stringify({ type: "Flush" }));
+      } catch (error) {
+        logger.error("Error sending TTS:", error);
+      }
+    };
+
+    // Initialize Deepgram connections with retry logic
+    const initSTT = () => {
+      try {
+        // Initialize both connections in parallel
+        const initPromises = [];
+
+        // Initialize TTS connection
+        logger.debug("Initializing Deepgram TTS connection");
+        ttsConnection = deepgram.speak.live({
+          model: "aura-asteria-en",
+          voice: "male",
+          encoding: "mulaw",
+          sample_rate: 8000,
+          container: "none",
+          volume: 2.0,
+        });
+
+        const ttsPromise = new Promise((resolve) => {
+          ttsConnection.on(LiveTTSEvents.Open, () => {
+            logger.info("Deepgram TTS connection established");
+            ttsReady = true;
+            resolve();
+          });
+
+          // Listen for the Cleared event
+          ttsConnection.on(LiveTTSEvents.Clear, (data) => {
+            console.log("Buffer cleared successfully", data);
+            // Now you can be sure the previous audio generation has stopped
+          });
+
+          ttsConnection.on(LiveTTSEvents.Flushed, () => {
+            logger.info("TTS stream flushed");
+          });
+        });
+        initPromises.push(ttsPromise);
+
+        // Initialize STT connection
+        logger.debug("Initializing Deepgram STT connection");
+        sttConnection = deepgram.listen.live({
+          model: "nova-2-phonecall",
+          language: "en-US",
+          smart_format: true,
+          encoding: "mulaw",
+          sample_rate: 8000,
+          channels: 1,
+          interim_results: true,
+          endpointing: 300,
+          utterance_end_ms: 1500,
+          punctuate: true,
+          vad_events: true,
+        });
+
+        const sttPromise = new Promise((resolve) => {
+          sttConnection.on(LiveTranscriptionEvents.Open, () => {
+            logger.info("Deepgram STT connection established");
+            sttReady = true;
+            resolve();
+          });
+        });
+        initPromises.push(sttPromise);
+
+        // Wait for both connections to be ready
+        Promise.all(initPromises).then(() => {
+          logger.info("All Deepgram connections established");
+
+          // Process any buffered audio
+          if (audioBuffer.length > 0) {
+            logger.debug(
+              `Processing ${audioBuffer.length} buffered audio chunks`
+            );
+            audioBuffer.forEach((chunk) => {
+              if (sttConnection.getReadyState() === 1) {
+                sttConnection.send(chunk);
+              }
+            });
+            audioBuffer = [];
+          }
+        });
+
+        // Set up TTS event handlers
+        ttsConnection.on(LiveTTSEvents.Audio, (data) => {
+          if (!data || data.length === 0 || !isCallActive) {
+            logger.debug(
+              "Skipping audio data (empty, interrupted, or call ended)"
+            );
+            return;
+          }
+
+          try {
+            const buffer = Buffer.from(data);
+            const base64Data = buffer.toString("base64");
+            const audioDelta = {
+              event: "media",
+              media: {
+                payload: base64Data,
+              },
+            };
+
+            // Only send if not interrupted
+            if (connection.readyState === WebSocket.OPEN) {
+              connection.send(JSON.stringify(audioDelta));
+              logger.debug("Sent TTS audio chunk to Telnyx");
+            } else {
+              logger.debug("Skipping audio chunk due to interruption");
+            }
+          } catch (error) {
+            logger.error("Error sending TTS:", error);
+          }
+        });
+
+        ttsConnection.on(LiveTTSEvents.Error, (err) => {
+          logger.error("Deepgram TTS error:", err);
+        });
+
+        ttsConnection.on(LiveTTSEvents.Close, () => {
+          logger.info("Deepgram TTS connection closed");
+          ttsReady = false;
+        });
+
+        // Handle speech events
+        sttConnection.on(LiveTranscriptionEvents.SpeechStarted, () => {
+          logger.info("Speech started");
+          stopBotResponse();
+        });
+
+        sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+          logger.info("Utterance ended");
+        });
+
+        sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
+          try {
+            resetActivityTimer();
+            const text = data.channel.alternatives[0]?.transcript;
+            const confidence = data.channel.alternatives[0]?.confidence || 0;
+
+            if (!text?.trim() || confidence < 0.1) {
+              logger.debug(
+                `Ignored low quality transcript (${confidence}): "${text}"`
+              );
+              return;
+            }
+
+            if (data.speech_final) {
+              logger.info(`Speech final detected: "${text}"`);
+              logger.debug("Processing transcript...");
+              await processTranscript(text);
+            }
+          } catch (error) {
+            logger.error(`Processing transcript error: ${error.message}`);
+            if (error.response) {
+              logger.debug(
+                `Deepgram STT API Error Details: ${JSON.stringify(
+                  error.response.data
+                )}`
+              );
+            }
+          }
+        });
+
+        // Helper function to process complete transcripts
+        async function processTranscript(text) {
+          if (!text || !isCallActive) {
+            logger.debug(
+              `Skipping processing: text=${!!text}, callActive=${isCallActive}`
+            );
+            return;
+          }
+
+          logger.info(`Processing transcript: "${text}"`);
+
+          try {
+            const groq = new Groq({
+              apiKey: process.env.GROQ_API_KEY,
+            });
+
+            // Add user's message to history
+            conversationHistory.push({ role: "user", content: text });
+
+            // Keep only last 10 messages to prevent context from getting too long
+            if (conversationHistory.length > 11) {
+              // 1 system message + 10 conversation messages
+              conversationHistory = [
+                conversationHistory[0], // Keep system message
+                ...conversationHistory.slice(-10), // Keep last 10 messages
+              ];
+            }
+
+            logger.debug("Sending to Groq...");
+            const llmResponse = await groq.chat.completions.create({
+              model: "mixtral-8x7b-32768",
+              messages: conversationHistory,
+              temperature: 0.7,
+              max_completion_tokens: 50,
+              top_p: 0.8,
+            });
+
+            const responseText = llmResponse.choices[0]?.message?.content;
+            if (!responseText) {
+              logger.error("Empty response from Groq");
+              return;
+            }
+
+            // Add assistant's response to history
+            conversationHistory.push({
+              role: "assistant",
+              content: responseText,
+            });
+
+            logger.info(`LLM Response: "${responseText}"`);
+            logger.debug(
+              "Current conversation length: " + conversationHistory.length
+            );
+
+            // Check if call is still active before responding
+            if (!isCallActive) {
+              logger.debug("Call ended, skipping response");
+              return;
+            }
+
+            // Add a small natural pause before responding
+            await new Promise((resolve) => setTimeout(resolve, 300));
+
+            // Send the response using TTS
+            sendTTSResponse(responseText);
+          } catch (error) {
+            logger.error(`Processing error: ${error.message}`);
+            if (error.response) {
+              logger.debug(
+                `API Error Details: ${JSON.stringify(error.response.data)}`
+              );
+            }
+          }
+        }
+      } catch (error) {
+        logger.error(`Initialization failed: ${error.message}`);
+        safeClose();
+      }
+    };
+
+    // Start the initialization
+    initSTT();
+
+    // Handle Telnyx media
+    connection.on("message", (message) => {
+      try {
+        resetActivityTimer();
+        const data = JSON.parse(message);
+
+        if (data.event === "media") {
+          try {
+            const audioChunk = Buffer.from(data.media.payload, "base64");
+
+            if (sttReady) {
+              // Send audio directly when ready
+              sttConnection.send(audioChunk);
+            } else {
+              logger.error("Deepgram STT connection not ready");
+            }
+          } catch (error) {
+            logger.error(`Error handling audio: ${error.message}`);
+          }
+        }
+      } catch (error) {
+        logger.error(`Message handling error: ${error.message}`);
+        safeClose();
+      }
+    });
+
+    // Handle connection close
+    connection.on("close", (code, reason) => {
+      logger.info(`WebSocket closed (${code}) - ${reason.toString()}`);
+      isCallActive = false; // Mark call as inactive
+      safeClose();
+    });
+
+    connection.on("error", (error) => {
+      logger.error(`WebSocket error: ${error.message}`);
+      safeClose();
+    });
+
+    // Send periodic keep-alive messages
+    const keepAliveInterval = setInterval(() => {
+      if (connection.readyState === WebSocket.OPEN) {
+        try {
+          connection.send(JSON.stringify({ event: "keepalive" }));
+          logger.debug("Sent keep-alive message");
+        } catch (error) {
+          logger.error("Keep-alive failed: " + error.message);
+        }
+      }
+    }, 15000);
+
+    // Cleanup intervals on close
+    connection.on("close", () => {
+      clearInterval(keepAliveInterval);
+    });
+  });
 });
 
 // Call status webhook handler
