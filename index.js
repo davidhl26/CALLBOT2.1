@@ -194,12 +194,12 @@ fastify.post("/initiate-call", async (request, reply) => {
 // TeXML handler for outbound calls
 fastify.all("/outbound-call-handler", async (request, reply) => {
   console.log("🚀 ~ fastify.all ~ request-header-host:", request.headers.host);
-  const websocketURL = `wss://${request.headers.host}/media-stream2`;
+  const websocketURL = `wss://${request.headers.host}/media-stream`;
   console.log("🚀 ~ fastify.all ~ websocket:", websocketURL);
   const texmlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                         <Response>                           
                             <Connect>
-                                <Stream url="wss://${request.headers.host}/media-stream2" bidirectionalMode="rtp" />
+                                <Stream url="wss://${request.headers.host}/media-stream" bidirectionalMode="rtp" />
                             </Connect>
                         </Response>`;
 
