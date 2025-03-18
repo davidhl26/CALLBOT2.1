@@ -218,7 +218,6 @@ fastify.register(async (fastify) => {
     let sttReady = false;
     let ttsReady = false;
     let audioBuffer = []; // Buffer for audio during initialization
-    let isUserSpeaking = false; // Track if user is speaking
 
     // Add conversation history array
     let conversationHistory = [{ role: "system", content: SYSTEM_MESSAGE }];
@@ -304,7 +303,7 @@ fastify.register(async (fastify) => {
 
     // Add the sendTTSResponse function
     const sendTTSResponse = (text) => {
-      if (!text || isUserSpeaking) {
+      if (!text) {
         logger.info("Skipping TTS response as user is speaking.");
         return;
       }
@@ -449,12 +448,10 @@ fastify.register(async (fastify) => {
         sttConnection.on(LiveTranscriptionEvents.SpeechStarted, () => {
           logger.info("Speech started");
           stopBotResponse();
-          isUserSpeaking = true; // Block bot response
         });
 
         sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
           logger.info("Utterance ended");
-          isUserSpeaking = false; // Allow bot response
         });
 
         sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
