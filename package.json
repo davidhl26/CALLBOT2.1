@@ -10,7 +10,10 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "migrate": "NODE_ENV=production sequelize-cli db:migrate",
+    "migrate:undo": "NODE_ENV=production sequelize-cli db:migrate:undo",
+    "migrate:undo:all": "NODE_ENV=production sequelize-cli db:migrate:undo:all"
   },
   "dependencies": {
     "@deepgram/sdk": "^3.11.2",

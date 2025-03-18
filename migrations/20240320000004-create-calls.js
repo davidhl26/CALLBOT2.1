@@ -37,6 +37,23 @@ export async function up(queryInterface, Sequelize) {
     system_message: {
       type: Sequelize.TEXT,
     },
+    recording_url: {
+      type: Sequelize.TEXT,
+    },
+    campaign_id: {
+      type: Sequelize.INTEGER,
+      references: {
+        model: "Campaigns",
+        key: "id",
+      },
+    },
+    contact_id: {
+      type: Sequelize.UUID,
+      references: {
+        model: "Contacts",
+        key: "id",
+      },
+    },
     createdAt: {
       type: Sequelize.DATE,
       allowNull: false,
