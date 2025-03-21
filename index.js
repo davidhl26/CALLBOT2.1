@@ -18,8 +18,10 @@ import Campaign from "./models/campaign.js";
 import callRoutes from "./routes/calls.js";
 import campaignRoutes from "./routes/campaigns.js";
 import contactRoutes from "./routes/contacts.js";
+import elevenLabsRoutes from "./routes/elevenLabsRoutes.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 import { handleWebhook, processCampaignBatch } from "./services/campaign.js";
+import { getSignedUrl } from "./utils/elevenLabs.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -63,6 +65,7 @@ fastify.register(telnyxNumberRoutes);
 fastify.register(callRoutes);
 fastify.register(contactRoutes);
 fastify.register(campaignRoutes, { prefix: "/api/campaigns" });
+fastify.register(elevenLabsRoutes);
 
 // Constants
 let SYSTEM_MESSAGE = `
@@ -71,7 +74,7 @@ Speak casually, like a real person on a phone call—short and to the point.
 
 - Keep responses **brief** (1-2 sentences max).
 - Use natural conversation fillers: "Umm...", "Well...", "I mean..."
-- Be witty, but **don’t ramble**.
+- Be witty, but **don't ramble**.
 - If booking an appointment, gather info step by step:
   1. Ask for their full name.
   2. Ask why they need the appointment.
@@ -191,6 +194,113 @@ fastify.post("/initiate-call", async (request, reply) => {
   }
 });
 
+// Route for initiating outbound calls with eleven labs
+fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
+  console.log("Initiating ElevenLabs call with:", {
+    to: request.body.to,
+    from: request.body.from,
+    campaign_id: request.body.campaign_id,
+    contact_id: request.body.contact_id,
+    first_message: request.body.first_message,
+  });
+
+  const { to, from, system_message, campaign_id, contact_id, first_message } =
+    request.body;
+
+  // Validate required parameters
+  if (!to || !from) {
+    return reply.code(400).send({
+      error:
+        "Missing required parameters: 'to' and 'from' phone numbers are required",
+    });
+  }
+
+  // Check for ElevenLabs credentials
+  if (!process.env.ELEVENLABS_API_KEY || !process.env.ELEVENLABS_AGENT_ID) {
+    return reply.code(400).send({
+      error:
+        "ElevenLabs credentials are missing. Please set ELEVENLABS_API_KEY and ELEVENLABS_AGENT_ID in your .env file.",
+    });
+  }
+
+  try {
+    // Create a safe version of system_message and first_message for URL
+    const encodedSystemMessage = encodeURIComponent(system_message || "");
+    const encodedFirstMessage = encodeURIComponent(
+      first_message || "Hello, this is Mary's Dental. How can I help you today?"
+    );
+
+    const data = {
+      To: to,
+      From: from,
+      UrlMethod: "GET",
+      Record: "true",
+      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}`,
+      StatusCallback: `${process.env.PUBLIC_SERVER_URL}/call-status`,
+    };
+
+    const config = {
+      method: "post",
+      url: `https://api.telnyx.com/v2/texml/calls/2632670363749713721`,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${process.env.TELNYX_API_KEY}`,
+      },
+      data: data,
+    };
+
+    console.log("Making Telnyx API request with ElevenLabs config:", {
+      to: data.To,
+      from: data.From,
+      url: data.Url.substring(0, 100) + "...", // Truncate for logging
+    });
+
+    const response = await axios.request(config);
+    console.log("Telnyx API response:", response.data);
+
+    // Extract call_sid from response
+    const call_sid = response.data.call_sid;
+    if (!call_sid) {
+      throw new Error("No call_sid received from Telnyx");
+    }
+
+    // Create call record in database
+    console.log("Creating ElevenLabs call record with:", {
+      call_sid,
+      from_number: from,
+      to_number: to,
+      campaign_id,
+      contact_id,
+      provider: "elevenlabs",
+    });
+
+    const call = await Call.create({
+      call_sid,
+      from_number: from,
+      to_number: to,
+      status: "queued",
+      campaign_id,
+      contact_id,
+      system_message,
+      first_message,
+      provider: "elevenlabs",
+    });
+
+    console.log("ElevenLabs call record created:", call.toJSON());
+    reply.send(response.data);
+  } catch (error) {
+    console.error(
+      "Error making ElevenLabs outbound call:",
+      error.response?.data || error
+    );
+    reply.code(500).send({
+      error: "Failed to initiate ElevenLabs call",
+      details: error.response?.data || error.message,
+    });
+  }
+});
+
 // TeXML handler for outbound calls
 fastify.all("/outbound-call-handler", async (request, reply) => {
   console.log("🚀 ~ fastify.all ~ request-header-host:", request.headers.host);
@@ -204,6 +314,431 @@ fastify.all("/outbound-call-handler", async (request, reply) => {
                         </Response>`;
 
   reply.type("text/xml").send(texmlResponse);
+});
+
+// TeXML handler for outbound calls with eleven labs
+fastify.all("/outbound-call-handler-eleven-labs", async (request, reply) => {
+  const system_message = request.query.system_message || "";
+  const first_message = request.query.first_message || "";
+
+  console.log("[ElevenLabs TeXML Handler] Received parameters:", {
+    system_message: system_message.substring(0, 100) + "...",
+    first_message,
+  });
+
+  // XML-encode the parameters
+  const xmlEncodedSystemMessage = system_message
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+
+  const xmlEncodedFirstMessage = first_message
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+
+  // Create the TeXML response with properly encoded parameters
+  const texmlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+        <Connect>
+            <Stream url="wss://${request.headers.host}/media-stream-eleven-labs"  bidirectionalMode="rtp">
+                <Parameter name="system_message" value="${xmlEncodedSystemMessage}" />
+                <Parameter name="first_message" value="${xmlEncodedFirstMessage}" />
+            </Stream>
+        </Connect>
+    </Response>`;
+
+  reply.type("text/xml").send(texmlResponse);
+});
+
+// WebSocket route for handling media streams with eleven labs
+fastify.register(async (fastifyInstance) => {
+  fastifyInstance.get(
+    "/media-stream-eleven-labs",
+    { websocket: true },
+    (ws, req) => {
+      console.info("[Server] Telnyx connected to outbound media stream");
+
+      // Variables to track the call
+      let streamSid = null;
+      let callSid = null;
+      let elevenLabsWs = null;
+      let customParameters = null; // Add this to store parameters
+      let isClosing = false;
+
+      // Handle WebSocket errors
+      ws.on("error", (error) => {
+        console.error("[Telnyx] WebSocket error:", error);
+      });
+
+      // Set up ElevenLabs connection
+      const setupElevenLabs = async () => {
+        try {
+          console.log(
+            "[ElevenLabs] Getting signed URL for agent:",
+            process.env.ELEVENLABS_AGENT_ID
+          );
+          const signedUrl = await getSignedUrl(
+            process.env.ELEVENLABS_AGENT_ID,
+            process.env.ELEVENLABS_API_KEY
+          );
+          elevenLabsWs = new WebSocket(signedUrl);
+
+          // Set a ping interval to keep the connection alive
+          const pingInterval = setInterval(() => {
+            if (elevenLabsWs.readyState === WebSocket.OPEN) {
+              console.log("[ElevenLabs] Sending keepalive ping");
+              elevenLabsWs.send(JSON.stringify({ type: "ping" }));
+            } else {
+              clearInterval(pingInterval);
+            }
+          }, 30000); // 30 seconds
+
+          elevenLabsWs.on("open", () => {
+            console.log("[ElevenLabs] Connected to Conversational AI");
+
+            // Send initial configuration with prompt and first message
+            const initialConfig = {
+              type: "conversation_initiation_client_data",
+              dynamic_variables: {
+                call_id: callSid || streamSid || "unknown",
+              },
+
+              conversation_config_override: {
+                agent: {
+                  prompt: {
+                    prompt: customParameters?.system_message || SYSTEM_MESSAGE,
+                  },
+                  first_message:
+                    customParameters?.first_message ||
+                    "Hello, this is Mary's Dental. How can I help you today?",
+                },
+              },
+            };
+
+            console.log(
+              "[ElevenLabs] Sending initial config with prompt:",
+              initialConfig.conversation_config_override.agent.prompt.prompt
+            );
+
+            // Send the configuration to ElevenLabs
+            elevenLabsWs.send(JSON.stringify(initialConfig));
+          });
+
+          // Set up our message processor outside the WebSocket event handlers
+          // to help diagnose potential issues
+          const processElevenLabsMessage = (data) => {
+            try {
+              const message = JSON.parse(data);
+              const messageType = message.type;
+
+              // Log metadata about message but not full content
+              console.log(`[ElevenLabs] Received message type: ${messageType}`);
+
+              switch (messageType) {
+                case "conversation_initiation_metadata":
+                  console.log(
+                    "[ElevenLabs] Received initiation metadata:",
+                    message.conversation_initiation_metadata_event
+                  );
+                  break;
+
+                case "audio":
+                  console.log("🚀 inside audio");
+                  // Check if we have audio content and log the size
+                  if (message.audio?.chunk) {
+                    const chunkSize = message.audio.chunk.length;
+                    console.log(
+                      `[ElevenLabs] Received audio chunk: ${chunkSize} bytes`
+                    );
+                  } else if (message.audio_event?.audio_base_64) {
+                    const chunkSize = message.audio_event.audio_base_64.length;
+                    console.log(
+                      `[ElevenLabs] Received audio event: ${chunkSize} bytes`
+                    );
+                  } else {
+                    console.log(
+                      "[ElevenLabs] Received audio message without audio data"
+                    );
+                  }
+                  console.log(
+                    "🚀 ~ processElevenLabsMessage ~ streamSid:",
+                    streamSid
+                  );
+
+                  if (streamSid) {
+                    try {
+                      // Format audio data consistently regardless of which property contains it
+                      let audioBase64 = null;
+
+                      if (message.audio?.chunk) {
+                        console.log("🚀 inside audio chunk");
+                        audioBase64 = message.audio.chunk;
+                      } else if (message.audio_event?.audio_base_64) {
+                        console.log("🚀 inside audio base 64");
+                        audioBase64 = message.audio_event.audio_base_64;
+                      }
+
+                      if (
+                        message.audio?.chunk ||
+                        message.audio_event?.audio_base_64
+                      ) {
+                        // Ensure the audio is properly formatted for Telnyx
+                        const audioData = {
+                          event: "media",
+                          media: {
+                            payload: audioBase64,
+                            // payload: Buffer.from(audioBase64),
+                          },
+                        };
+                        console.log(
+                          "🚀 ~ processElevenLabsMessage ~ audioData:",
+                          audioData
+                        );
+
+                        if (ws.readyState === WebSocket.OPEN) {
+                          ws.send(JSON.stringify(audioData));
+                          console.log(
+                            "[ElevenLabs] Sent audio chunk to Telnyx"
+                          );
+                        } else {
+                          console.log(
+                            `[ElevenLabs] Cannot send audio: WebSocket state=${ws.readyState}`
+                          );
+                        }
+                      } else {
+                        console.log("[ElevenLabs] No audio data to send");
+                      }
+                    } catch (error) {
+                      console.error(
+                        "[ElevenLabs] Error processing audio:",
+                        error
+                      );
+                    }
+                  } else {
+                    console.log(
+                      "[ElevenLabs] Received audio but no StreamSid yet"
+                    );
+                  }
+                  break;
+
+                case "interruption":
+                  if (streamSid) {
+                    console.log("[ElevenLabs] Processing interruption event");
+                    ws.send(
+                      JSON.stringify({
+                        event: "clear",
+                        streamSid,
+                      })
+                    );
+                  }
+                  break;
+
+                case "ping":
+                  if (message.ping_event?.event_id) {
+                    elevenLabsWs.send(
+                      JSON.stringify({
+                        type: "pong",
+                        event_id: message.ping_event.event_id,
+                      })
+                    );
+                    console.log("[ElevenLabs] Responded to ping with pong");
+                  }
+                  break;
+
+                case "agent_response":
+                  console.log(
+                    `[ElevenLabs] Agent response: ${message.agent_response_event?.agent_response}`
+                  );
+                  break;
+
+                case "user_transcript":
+                  console.log(
+                    `[ElevenLabs] User transcript: ${message.user_transcription_event?.user_transcript}`
+                  );
+                  break;
+
+                default:
+                  console.log(
+                    `[ElevenLabs] Unhandled message type: ${messageType}`,
+                    message
+                  );
+              }
+
+              return true;
+            } catch (error) {
+              console.error("[ElevenLabs] Error processing message:", error);
+              return false;
+            }
+          };
+
+          // Now use this processor in the WebSocket handler
+          elevenLabsWs.on("message", processElevenLabsMessage);
+
+          elevenLabsWs.on("error", (error) => {
+            console.error("[ElevenLabs] WebSocket error:", error);
+          });
+
+          elevenLabsWs.on("close", (code, reason) => {
+            console.log(
+              `[ElevenLabs] Disconnected with code ${code}: ${
+                reason || "No reason provided"
+              }`
+            );
+            clearInterval(pingInterval);
+
+            // Try to reconnect if not intentionally closed and call is still active
+            if (!isClosing && ws.readyState === WebSocket.OPEN) {
+              console.log("[ElevenLabs] Attempting to reconnect...");
+              setTimeout(setupElevenLabs, 2000);
+            }
+          });
+
+          return true;
+        } catch (error) {
+          console.error("[ElevenLabs] Setup error:", error);
+          return false;
+        }
+      };
+
+      // Handle messages from Telnyx
+      ws.on("message", async (message) => {
+        try {
+          const msg = JSON.parse(message);
+
+          if (msg.event !== "media") {
+            console.log(`[Telnyx] Received event: ${msg.event}`);
+          }
+
+          switch (msg.event) {
+            case "start":
+              streamSid = msg.stream_id;
+              try {
+                callSid = msg.start.call_session_id;
+                customParameters = msg.start.custom_parameters; // Store parameters
+              } catch (e) {
+                console.error("[Telnyx] Error extracting call data:", e);
+                // Try alternative location for backward compatibility
+                callSid = msg.start?.call_control_id || streamSid;
+              }
+
+              console.log(
+                `[Telnyx] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`
+              );
+              console.log("[Telnyx] Start parameters:", customParameters);
+
+              // Now that we have the necessary IDs, initialize ElevenLabs
+              const setupSuccess = await setupElevenLabs();
+              if (!setupSuccess) {
+                console.log(
+                  "[Telnyx] Failed to set up ElevenLabs, will retry in 2 seconds"
+                );
+                setTimeout(async () => {
+                  const retrySuccess = await setupElevenLabs();
+                  if (!retrySuccess) {
+                    console.error(
+                      "[Telnyx] Failed to set up ElevenLabs after retry"
+                    );
+                  }
+                }, 2000);
+              }
+              break;
+
+            case "media":
+              if (elevenLabsWs?.readyState === WebSocket.OPEN) {
+                try {
+                  // Process audio and send to ElevenLabs
+                  // Note: ElevenLabs expects base64 audio, but we need to make sure
+                  // it's properly formatted
+                  const audioBase64 = msg.media.payload;
+
+                  const audioMessage = {
+                    user_audio_chunk: audioBase64,
+                  };
+
+                  elevenLabsWs.send(JSON.stringify(audioMessage));
+
+                  // Debug every 100th chunk to avoid flooding logs
+                  if (Math.random() < 0.01) {
+                    console.log("[Telnyx] Sent audio chunk to ElevenLabs");
+                  }
+                } catch (error) {
+                  console.error(
+                    "[Telnyx] Error sending audio to ElevenLabs:",
+                    error
+                  );
+                }
+              }
+              break;
+
+            case "stop":
+              console.log(`[Telnyx] Stream ${streamSid} ended`);
+              isClosing = true;
+              if (elevenLabsWs?.readyState === WebSocket.OPEN) {
+                try {
+                  // Send proper close message to ElevenLabs
+                  elevenLabsWs.send(
+                    JSON.stringify({ type: "end_conversation" })
+                  );
+                  setTimeout(() => {
+                    elevenLabsWs.close();
+                  }, 1000);
+                } catch (error) {
+                  console.error(
+                    "[Telnyx] Error closing ElevenLabs connection:",
+                    error
+                  );
+                  elevenLabsWs.close();
+                }
+              }
+              break;
+
+            default:
+              console.log(`[Telnyx] Unhandled event: ${msg.event}`);
+          }
+        } catch (error) {
+          console.error("[Telnyx] Error processing message:", error);
+        }
+      });
+
+      // Send periodic keep-alive messages to Telnyx
+      const keepAliveInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(JSON.stringify({ event: "keepalive" }));
+            console.log("[Telnyx] Sent keep-alive message");
+          } catch (error) {
+            console.error("[Telnyx] Keep-alive error:", error);
+          }
+        } else {
+          clearInterval(keepAliveInterval);
+        }
+      }, 30000);
+
+      // Handle WebSocket closure
+      ws.on("close", () => {
+        console.log("[Telnyx] Client disconnected");
+        isClosing = true;
+        clearInterval(keepAliveInterval);
+
+        if (elevenLabsWs?.readyState === WebSocket.OPEN) {
+          try {
+            elevenLabsWs.send(JSON.stringify({ type: "end_conversation" }));
+            setTimeout(() => {
+              elevenLabsWs.close();
+            }, 1000);
+          } catch (error) {
+            console.error("[Telnyx] Error during graceful shutdown:", error);
+            elevenLabsWs.close();
+          }
+        }
+      });
+    }
+  );
 });
 
 // Generate a unique session ID for tracking
