@@ -21,6 +21,7 @@ import contactRoutes from "./routes/contacts.js";
 import elevenLabsRoutes from "./routes/elevenLabsRoutes.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 import { processCampaignBatch } from "./services/campaign.js";
+import { cleanupCall } from "./utils/callCleanup.js";
 import { getSignedUrl } from "./utils/elevenLabs.js";
 
 // Load environment variables from .env file
@@ -452,10 +453,6 @@ fastify.register(async (fastifyInstance) => {
                       "[ElevenLabs] Received audio message without audio data"
                     );
                   }
-                  console.log(
-                    "🚀 ~ processElevenLabsMessage ~ streamSid:",
-                    streamSid
-                  );
 
                   if (streamSid) {
                     try {
@@ -470,7 +467,6 @@ fastify.register(async (fastifyInstance) => {
                           event: "media",
                           media: {
                             payload: audioBase64,
-                            // payload: Buffer.from(audioBase64),
                           },
                         };
 
@@ -568,11 +564,16 @@ fastify.register(async (fastifyInstance) => {
             console.error("[ElevenLabs] WebSocket error:", error);
           });
 
-          elevenLabsWs.on("close", () => {
+          elevenLabsWs.on("close", async () => {
             console.log("[ElevenLabs] Disconnected");
-            // close the websocket
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.close();
+            // cleanupCall function to handle hangup and websocket closing
+            if (callControlId) {
+              await cleanupCall(callControlId, ws, elevenLabsWs);
+            } else {
+              // Just close the telnyx websocket if no callControlId
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.close();
+              }
             }
           });
 
@@ -644,18 +645,17 @@ fastify.register(async (fastifyInstance) => {
       });
 
       ws.on("close", async () => {
-        // hungup the call
-        // if (callControlId) {
-        //   const response = await hangupCall(callControlId);
-        //   if (response.data) {
-        //     console.log("[Telnyx] Hangup response:", response.data);
-        //   }
-        // }
+        // Use the new cleanupCall function
+        if (callControlId) {
+          await cleanupCall(callControlId, ws, elevenLabsWs);
+        } else {
+          // Just close the elevenLabs websocket if no callControlId
+          if (elevenLabsWs?.readyState === WebSocket.OPEN) {
+            elevenLabsWs.close();
+          }
+        }
 
         console.log("[Telnyx] Client disconnected");
-        if (elevenLabsWs?.readyState === WebSocket.OPEN) {
-          elevenLabsWs.close();
-        }
       });
     }
   );

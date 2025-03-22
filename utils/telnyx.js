@@ -27,7 +27,10 @@ export const hangupCall = async (callControlId) => {
     console.log("[Telnyx] Hangup response:", response.data);
     return response;
   } catch (error) {
-    console.error("[Telnyx] Error hanging up call:", error);
+    console.error(
+      "[Telnyx] Error hanging up call:",
+      error.response?.data || error.message
+    );
     return null;
   }
 };
