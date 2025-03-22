@@ -20,7 +20,8 @@ import campaignRoutes from "./routes/campaigns.js";
 import contactRoutes from "./routes/contacts.js";
 import elevenLabsRoutes from "./routes/elevenLabsRoutes.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
-import { handleWebhook, processCampaignBatch } from "./services/campaign.js";
+import { processCampaignBatch } from "./services/campaign.js";
+import { cleanupCall } from "./utils/callCleanup.js";
 import { getSignedUrl } from "./utils/elevenLabs.js";
 
 // Load environment variables from .env file
@@ -368,8 +369,8 @@ fastify.register(async (fastifyInstance) => {
       let callSid = null;
       let elevenLabsWs = null;
       let customParameters = null; // Add this to store parameters
-      let isClosing = false;
-
+      let callSessionId = null;
+      let callControlId = null;
       // Handle WebSocket errors
       ws.on("error", (error) => {
         console.error("[Telnyx] WebSocket error:", error);
@@ -387,16 +388,6 @@ fastify.register(async (fastifyInstance) => {
             process.env.ELEVENLABS_API_KEY
           );
           elevenLabsWs = new WebSocket(signedUrl);
-
-          // Set a ping interval to keep the connection alive
-          const pingInterval = setInterval(() => {
-            if (elevenLabsWs.readyState === WebSocket.OPEN) {
-              console.log("[ElevenLabs] Sending keepalive ping");
-              elevenLabsWs.send(JSON.stringify({ type: "ping" }));
-            } else {
-              clearInterval(pingInterval);
-            }
-          }, 30000); // 30 seconds
 
           elevenLabsWs.on("open", () => {
             console.log("[ElevenLabs] Connected to Conversational AI");
@@ -429,8 +420,6 @@ fastify.register(async (fastifyInstance) => {
             elevenLabsWs.send(JSON.stringify(initialConfig));
           });
 
-          // Set up our message processor outside the WebSocket event handlers
-          // to help diagnose potential issues
           const processElevenLabsMessage = (data) => {
             try {
               const message = JSON.parse(data);
@@ -448,7 +437,6 @@ fastify.register(async (fastifyInstance) => {
                   break;
 
                 case "audio":
-                  console.log("🚀 inside audio");
                   // Check if we have audio content and log the size
                   if (message.audio?.chunk) {
                     const chunkSize = message.audio.chunk.length;
@@ -465,40 +453,22 @@ fastify.register(async (fastifyInstance) => {
                       "[ElevenLabs] Received audio message without audio data"
                     );
                   }
-                  console.log(
-                    "🚀 ~ processElevenLabsMessage ~ streamSid:",
-                    streamSid
-                  );
 
                   if (streamSid) {
                     try {
                       // Format audio data consistently regardless of which property contains it
                       let audioBase64 = null;
 
-                      if (message.audio?.chunk) {
-                        console.log("🚀 inside audio chunk");
-                        audioBase64 = message.audio.chunk;
-                      } else if (message.audio_event?.audio_base_64) {
-                        console.log("🚀 inside audio base 64");
-                        audioBase64 = message.audio_event.audio_base_64;
-                      }
+                      audioBase64 = message.audio_event.audio_base_64;
 
-                      if (
-                        message.audio?.chunk ||
-                        message.audio_event?.audio_base_64
-                      ) {
+                      if (audioBase64) {
                         // Ensure the audio is properly formatted for Telnyx
                         const audioData = {
                           event: "media",
                           media: {
                             payload: audioBase64,
-                            // payload: Buffer.from(audioBase64),
                           },
                         };
-                        console.log(
-                          "🚀 ~ processElevenLabsMessage ~ audioData:",
-                          audioData
-                        );
 
                         if (ws.readyState === WebSocket.OPEN) {
                           ws.send(JSON.stringify(audioData));
@@ -562,13 +532,24 @@ fastify.register(async (fastifyInstance) => {
                   );
                   break;
 
+                case "tool_request":
+                  console.log(
+                    `[ElevenLabs] Tool request: ${message.tool_request?.tool_name}`
+                  );
+                  break;
+
+                case "client_tool_call":
+                  console.log(
+                    `[ElevenLabs] Client tool call: ${message.client_tool_call?.tool_name}`
+                  );
+                  break;
+
                 default:
                   console.log(
                     `[ElevenLabs] Unhandled message type: ${messageType}`,
                     message
                   );
               }
-
               return true;
             } catch (error) {
               console.error("[ElevenLabs] Error processing message:", error);
@@ -583,18 +564,16 @@ fastify.register(async (fastifyInstance) => {
             console.error("[ElevenLabs] WebSocket error:", error);
           });
 
-          elevenLabsWs.on("close", (code, reason) => {
-            console.log(
-              `[ElevenLabs] Disconnected with code ${code}: ${
-                reason || "No reason provided"
-              }`
-            );
-            clearInterval(pingInterval);
-
-            // Try to reconnect if not intentionally closed and call is still active
-            if (!isClosing && ws.readyState === WebSocket.OPEN) {
-              console.log("[ElevenLabs] Attempting to reconnect...");
-              setTimeout(setupElevenLabs, 2000);
+          elevenLabsWs.on("close", async () => {
+            console.log("[ElevenLabs] Disconnected");
+            // cleanupCall function to handle hangup and websocket closing
+            if (callControlId) {
+              await cleanupCall(callControlId, ws, elevenLabsWs);
+            } else {
+              // Just close the telnyx websocket if no callControlId
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.close();
+              }
             }
           });
 
@@ -604,6 +583,7 @@ fastify.register(async (fastifyInstance) => {
           return false;
         }
       };
+      setupElevenLabs();
 
       // Handle messages from Telnyx
       ws.on("message", async (message) => {
@@ -617,51 +597,25 @@ fastify.register(async (fastifyInstance) => {
           switch (msg.event) {
             case "start":
               streamSid = msg.stream_id;
-              try {
-                callSid = msg.start.call_session_id;
-                customParameters = msg.start.custom_parameters; // Store parameters
-              } catch (e) {
-                console.error("[Telnyx] Error extracting call data:", e);
-                // Try alternative location for backward compatibility
-                callSid = msg.start?.call_control_id || streamSid;
-              }
+              callControlId = msg.start.call_control_id;
+              callSid = msg.start.call_session_id;
+              customParameters = msg.start.custom_parameters; // Store parameters
 
               console.log(
                 `[Telnyx] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`
               );
               console.log("[Telnyx] Start parameters:", customParameters);
 
-              // Now that we have the necessary IDs, initialize ElevenLabs
-              const setupSuccess = await setupElevenLabs();
-              if (!setupSuccess) {
-                console.log(
-                  "[Telnyx] Failed to set up ElevenLabs, will retry in 2 seconds"
-                );
-                setTimeout(async () => {
-                  const retrySuccess = await setupElevenLabs();
-                  if (!retrySuccess) {
-                    console.error(
-                      "[Telnyx] Failed to set up ElevenLabs after retry"
-                    );
-                  }
-                }, 2000);
-              }
               break;
 
             case "media":
               if (elevenLabsWs?.readyState === WebSocket.OPEN) {
                 try {
-                  // Process audio and send to ElevenLabs
-                  // Note: ElevenLabs expects base64 audio, but we need to make sure
-                  // it's properly formatted
                   const audioBase64 = msg.media.payload;
-
                   const audioMessage = {
                     user_audio_chunk: audioBase64,
                   };
-
                   elevenLabsWs.send(JSON.stringify(audioMessage));
-
                   // Debug every 100th chunk to avoid flooding logs
                   if (Math.random() < 0.01) {
                     console.log("[Telnyx] Sent audio chunk to ElevenLabs");
@@ -677,23 +631,8 @@ fastify.register(async (fastifyInstance) => {
 
             case "stop":
               console.log(`[Telnyx] Stream ${streamSid} ended`);
-              isClosing = true;
               if (elevenLabsWs?.readyState === WebSocket.OPEN) {
-                try {
-                  // Send proper close message to ElevenLabs
-                  elevenLabsWs.send(
-                    JSON.stringify({ type: "end_conversation" })
-                  );
-                  setTimeout(() => {
-                    elevenLabsWs.close();
-                  }, 1000);
-                } catch (error) {
-                  console.error(
-                    "[Telnyx] Error closing ElevenLabs connection:",
-                    error
-                  );
-                  elevenLabsWs.close();
-                }
+                elevenLabsWs.close();
               }
               break;
 
@@ -705,37 +644,18 @@ fastify.register(async (fastifyInstance) => {
         }
       });
 
-      // Send periodic keep-alive messages to Telnyx
-      const keepAliveInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          try {
-            ws.send(JSON.stringify({ event: "keepalive" }));
-            console.log("[Telnyx] Sent keep-alive message");
-          } catch (error) {
-            console.error("[Telnyx] Keep-alive error:", error);
-          }
+      ws.on("close", async () => {
+        // Use the new cleanupCall function
+        if (callControlId) {
+          await cleanupCall(callControlId, ws, elevenLabsWs);
         } else {
-          clearInterval(keepAliveInterval);
-        }
-      }, 30000);
-
-      // Handle WebSocket closure
-      ws.on("close", () => {
-        console.log("[Telnyx] Client disconnected");
-        isClosing = true;
-        clearInterval(keepAliveInterval);
-
-        if (elevenLabsWs?.readyState === WebSocket.OPEN) {
-          try {
-            elevenLabsWs.send(JSON.stringify({ type: "end_conversation" }));
-            setTimeout(() => {
-              elevenLabsWs.close();
-            }, 1000);
-          } catch (error) {
-            console.error("[Telnyx] Error during graceful shutdown:", error);
+          // Just close the elevenLabs websocket if no callControlId
+          if (elevenLabsWs?.readyState === WebSocket.OPEN) {
             elevenLabsWs.close();
           }
         }
+
+        console.log("[Telnyx] Client disconnected");
       });
     }
   );
@@ -743,7 +663,7 @@ fastify.register(async (fastifyInstance) => {
 
 // Generate a unique session ID for tracking
 const generateSessionId = () => uuidv4().substring(0, 8);
-
+// Deepgram and groq media stream
 fastify.register(async (fastify) => {
   fastify.get("/media-stream2", { websocket: true }, (connection, req) => {
     const sessionId = generateSessionId();
@@ -1272,96 +1192,6 @@ fastify.post("/call-status", async (request, reply) => {
   } catch (error) {
     console.error("Error processing webhook:", error);
     reply.code(500).send({ error: "Failed to process webhook" });
-  }
-});
-
-// Webhook handler for recording URLs
-fastify.post("/webhook", async (request, reply) => {
-  console.log("Webhook received:", request.body);
-  try {
-    const data = request.body;
-
-    // Handle TeXML webhook format
-    if (data.CallSid) {
-      console.log("Processing TeXML webhook:", data);
-      const call = await Call.findOne({ where: { call_sid: data.CallSid } });
-      if (call) {
-        const updates = {
-          status: data.CallStatus,
-          duration: data.CallDuration ? parseInt(data.CallDuration) : null,
-          recording_url: data.RecordingUrl,
-          end_time: data.EndTime ? new Date(data.EndTime) : null,
-        };
-
-        console.log("Updating call with TeXML data:", updates);
-        await call.update(updates);
-        console.log("Call updated successfully");
-
-        // Update campaign stats if needed
-        if (
-          call.campaign_id &&
-          (data.CallStatus === "completed" ||
-            data.CallStatus === "failed" ||
-            data.CallStatus === "no-answer")
-        ) {
-          const campaign = await Campaign.findByPk(call.campaign_id);
-          if (campaign) {
-            if (data.CallStatus === "completed") {
-              await campaign.increment("completed_calls");
-            } else {
-              await campaign.increment("failed_calls");
-            }
-            console.log("Campaign stats updated");
-          }
-        }
-      }
-    }
-    // Handle Telnyx webhook format
-    else if (data.data?.event_type?.startsWith("call.")) {
-      console.log("Processing Telnyx webhook:", data);
-      const callSid =
-        data.data.payload.call_control_id || data.data.payload.call_sid;
-      const status = data.data.payload.result;
-      const duration = data.data.payload.duration;
-      const recordingUrl = data.data.payload.recording_url;
-
-      const call = await Call.findOne({ where: { call_sid: callSid } });
-      if (call) {
-        const updates = {};
-
-        if (status) updates.status = status;
-        if (duration) updates.duration = parseInt(duration);
-        if (recordingUrl) updates.recording_url = recordingUrl;
-
-        console.log("Updating call with Telnyx data:", updates);
-        await call.update(updates);
-        console.log("Call updated successfully");
-
-        // Update campaign stats if needed
-        if (
-          call.campaign_id &&
-          (status === "completed" ||
-            status === "failed" ||
-            status === "no-answer")
-        ) {
-          const campaign = await Campaign.findByPk(call.campaign_id);
-          if (campaign) {
-            await campaign.increment(
-              status === "completed" ? "completed_calls" : "failed_calls"
-            );
-            console.log("Campaign stats updated");
-          }
-        }
-      }
-    }
-
-    await handleWebhook(data);
-    reply.send({ status: "success" });
-  } catch (error) {
-    console.error("Error handling webhook:", error);
-    reply
-      .code(500)
-      .send({ error: "Failed to process webhook", details: error.message });
   }
 });
 
