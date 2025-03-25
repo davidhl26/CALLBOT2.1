@@ -1332,10 +1332,9 @@ try {
   console.log("Database connection has been established successfully.");
 
   // Sync database (in development)
-  if (process.env.NODE_ENV !== "production") {
-    await sequelize.sync({ alter: true });
-    console.log("Database synced successfully");
-  }
+
+  await sequelize.sync({ alter: true });
+  console.log("Database synced successfully");
 } catch (error) {
   console.error("Unable to connect to the database:", error);
 }
