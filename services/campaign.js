@@ -1,6 +1,5 @@
 import axios from "axios";
 import Call from "../models/call.js";
-import Campaign from "../models/campaign.js";
 import Contact from "../models/Contact.js";
 
 const MAX_RETRIES = 3;
@@ -17,6 +16,14 @@ async function makeCallWithRetry(
   retries = 0
 ) {
   try {
+    // Ensure phone numbers have '+' prefix
+    const formattedToNumber = toNumber.startsWith("+")
+      ? toNumber
+      : "+" + toNumber;
+    const formattedFromNumber = fromNumber.startsWith("+")
+      ? fromNumber
+      : "+" + fromNumber;
+
     //determinne endpoint based on aiProvider
     let endpoint;
     if (aiProvider === "eleven_labs") {
@@ -25,11 +32,19 @@ async function makeCallWithRetry(
       endpoint = `${process.env.PUBLIC_SERVER_URL}/initiate-call-real-time-api`;
     } else if (aiProvider === "groq+deepgram") {
       endpoint = `${process.env.PUBLIC_SERVER_URL}/initiate-call-groq-deepgram`;
+    } else {
+      console.error(`Unknown AI provider: ${aiProvider}`);
+      endpoint = `${process.env.PUBLIC_SERVER_URL}/initiate-call-eleven-labs`; // Default to ElevenLabs
     }
+
+    console.log(
+      `Calling endpoint ${endpoint} with to=${formattedToNumber}, from=${formattedFromNumber}, aiProvider=${aiProvider}`
+    );
+
     // First try the local endpoint
     const response = await axios.post(endpoint, {
-      to: toNumber,
-      from: fromNumber,
+      to: formattedToNumber,
+      from: formattedFromNumber,
       system_message: systemMessage,
       first_message: firstMessage,
       ai_provider: aiProvider,
@@ -42,6 +57,17 @@ async function makeCallWithRetry(
       `Error making call to ${toNumber} (attempt ${retries + 1}):`,
       error.message
     );
+
+    // Log more detailed error information to help debug
+    if (error.response) {
+      console.error(`Response status: ${error.response.status}`);
+      console.error(`Response data:`, error.response.data);
+      console.error(`Response headers:`, error.response.headers);
+    } else if (error.request) {
+      console.error(`No response received. Request:`, error.request);
+    } else {
+      console.error(`Error details:`, error);
+    }
 
     // If we get a network error or 500, and haven't exceeded retries, try again
     if (
@@ -193,108 +219,8 @@ async function recycleCampaign(campaign) {
   }
 }
 
-// Handle webhook events
-async function handleWebhook(data) {
-  console.log("Call status update:", data.event_type, data.payload);
-  try {
-    const callSid = data.payload.call_control_id || data.payload.call_leg_id;
-    if (!callSid) {
-      console.log("No call SID found in webhook data");
-      return;
-    }
-
-    const call = await Call.findOne({
-      where: { call_sid: callSid },
-      include: [{ model: Campaign }],
-    });
-
-    if (!call) {
-      console.log("Call not found:", callSid);
-      return;
-    }
-
-    // Handle different webhook event types
-    switch (data.event_type) {
-      case "call.answered":
-        call.status = "in-progress";
-        call.start_time = new Date();
-        break;
-
-      case "call.hangup":
-      case "call.completed":
-        call.status = "completed";
-        call.end_time = new Date();
-        if (data.payload.call_duration) {
-          call.duration = parseInt(data.payload.call_duration);
-        }
-        // Update campaign stats
-        if (call.campaign_id) {
-          await Campaign.increment("completed_calls", {
-            where: { id: call.campaign_id },
-          });
-        }
-        break;
-
-      case "call.recording.saved":
-        if (data.payload.recording_url) {
-          call.recording_url = data.payload.recording_url;
-          console.log("Updated recording URL:", data.payload.recording_url);
-        }
-        break;
-
-      case "call.cost":
-        if (data.payload.cost) {
-          call.cost = parseFloat(data.payload.cost);
-        }
-        break;
-
-      case "call.failed":
-      case "call.no-answer":
-        call.status = "failed";
-        call.end_time = new Date();
-        // Update campaign stats
-        if (call.campaign_id) {
-          await Campaign.increment("failed_calls", {
-            where: { id: call.campaign_id },
-          });
-        }
-        break;
-    }
-
-    await call.save();
-
-    // Check if we should start next batch
-    if (
-      call.campaign_id &&
-      ["completed", "failed", "no-answer"].includes(call.status)
-    ) {
-      const campaign = await Campaign.findByPk(call.campaign_id);
-      if (campaign && campaign.status === "in_progress") {
-        // Check if all calls in current batch are done
-        const activeCalls = await Call.count({
-          where: {
-            campaign_id: call.campaign_id,
-            to_number: campaign.numbers_in_current_batch,
-            status: "in-progress",
-          },
-        });
-
-        if (activeCalls === 0 && campaign.numbers_to_call.length > 0) {
-          console.log(
-            `All calls in batch completed, starting next batch for campaign ${campaign.id}`
-          );
-          processCampaignBatch(campaign);
-        }
-      }
-    }
-  } catch (error) {
-    console.error("Error processing webhook:", error);
-  }
-}
-
 // Export the campaign functions
 export {
-  handleWebhook,
   makeCallWithRetry,
   processCampaignBatch,
   recycleCampaign,

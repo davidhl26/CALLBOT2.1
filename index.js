@@ -203,10 +203,39 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
     campaign_id: request.body.campaign_id,
     contact_id: request.body.contact_id,
     first_message: request.body.first_message,
+    voice: request.body.voice,
   });
 
-  const { to, from, system_message, campaign_id, contact_id, first_message } =
-    request.body;
+  const {
+    to,
+    from,
+    system_message,
+    campaign_id,
+    contact_id,
+    first_message,
+    voice,
+  } = request.body;
+  console.log("🚀 ~ fastify.post ~ voice:", voice);
+  // get voice id from voice
+  let voice_id;
+
+  switch (voice) {
+    case "voice_1":
+      voice_id = process.env.ELEVENLABS_VOICE_1;
+      break;
+    case "voice_2":
+      voice_id = process.env.ELEVENLABS_VOICE_2;
+      break;
+    case "voice_3":
+      voice_id = process.env.ELEVENLABS_VOICE_3;
+      break;
+    case "voice_4":
+      voice_id = process.env.ELEVENLABS_VOICE_4;
+      break;
+    default:
+      voice_id = process.env.ELEVENLABS_VOICE_1;
+      break;
+  }
 
   // Validate required parameters
   if (!to || !from) {
@@ -236,7 +265,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
       From: from,
       UrlMethod: "GET",
       Record: "true",
-      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}`,
+      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}&voice_id=${voice_id}`,
       StatusCallback: `${process.env.PUBLIC_SERVER_URL}/call-status`,
     };
 
@@ -321,10 +350,11 @@ fastify.all("/outbound-call-handler-real-time-api", async (request, reply) => {
 fastify.all("/outbound-call-handler-eleven-labs", async (request, reply) => {
   const system_message = request.query.system_message || "";
   const first_message = request.query.first_message || "";
-
+  const voice_id = request.query.voice_id;
   console.log("[ElevenLabs TeXML Handler] Received parameters:", {
     system_message: system_message.substring(0, 100) + "...",
     first_message,
+    voice_id,
   });
 
   // XML-encode the parameters
@@ -349,6 +379,7 @@ fastify.all("/outbound-call-handler-eleven-labs", async (request, reply) => {
             <Stream url="wss://${request.headers.host}/media-stream-eleven-labs"  bidirectionalMode="rtp">
                 <Parameter name="system_message" value="${xmlEncodedSystemMessage}" />
                 <Parameter name="first_message" value="${xmlEncodedFirstMessage}" />
+                <Parameter name="voice_id" value="${voice_id}" />
             </Stream>
         </Connect>
     </Response>`;
@@ -369,7 +400,6 @@ fastify.register(async (fastifyInstance) => {
       let callSid = null;
       let elevenLabsWs = null;
       let customParameters = null; // Add this to store parameters
-      let callSessionId = null;
       let callControlId = null;
       // Handle WebSocket errors
       ws.on("error", (error) => {
@@ -408,12 +438,21 @@ fastify.register(async (fastifyInstance) => {
                     customParameters?.first_message ||
                     "Hello, this is Mary's Dental. How can I help you today?",
                 },
+                tts: {
+                  voice_id:
+                    customParameters?.voice_id ||
+                    process.env.ELEVENLABS_VOICE_1,
+                },
               },
             };
 
             console.log(
               "[ElevenLabs] Sending initial config with prompt:",
               initialConfig.conversation_config_override.agent.prompt.prompt
+            );
+            console.log(
+              "[ElevenLabs] Sending initial config with voice_id:",
+              initialConfig.conversation_config_override.tts.voice_id
             );
 
             // Send the configuration to ElevenLabs

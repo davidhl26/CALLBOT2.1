@@ -31,17 +31,22 @@ export default async function campaignRoutes(fastify, options) {
         ai_provider,
       } = request.body;
 
+      // Format phone numbers by adding "+" if not present
+      const formattedNumbers = numbers.map((number) =>
+        number.startsWith("+") ? number : "+" + number
+      );
+
       // Create campaign with all initial numbers
       const campaign = await Campaign.create({
         name,
-        all_numbers: numbers,
-        numbers_to_call: numbers, // Initially, all numbers need to be called
+        all_numbers: formattedNumbers,
+        numbers_to_call: formattedNumbers, // Initially, all numbers need to be called
         telnyx_numbers,
         system_message,
         first_message,
         ai_provider,
         status: "pending",
-        total_calls: numbers.length,
+        total_calls: formattedNumbers.length,
       });
 
       return campaign;
@@ -660,6 +665,13 @@ export default async function campaignRoutes(fastify, options) {
             "CSV must contain phoneNumber, firstName, lastName, and gender columns",
         });
       }
+
+      // Format phone numbers by adding "+" if not present
+      contacts.forEach((contact) => {
+        if (contact.phoneNumber && !contact.phoneNumber.startsWith("+")) {
+          contact.phoneNumber = "+" + contact.phoneNumber;
+        }
+      });
 
       // Extract phone numbers for campaign
       const phoneNumbers = contacts.map((contact) => contact.phoneNumber);
