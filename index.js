@@ -326,7 +326,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
       error.response?.data || error
     );
     reply.code(500).send({
-      error: "Failed to initiate ElevenLabs call",
+      error: "Failed to initiate the call",
       details: error.response?.data || error.message,
     });
   }
