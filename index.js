@@ -214,6 +214,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
     contact_id,
     first_message,
     voice,
+    language,
   } = request.body;
   console.log("🚀 ~ fastify.post ~ voice:", voice);
   // get voice id from voice
@@ -265,7 +266,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
       From: from,
       UrlMethod: "GET",
       Record: "true",
-      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}&voice_id=${voice_id}`,
+      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}&voice_id=${voice_id}&language=${language}`,
       StatusCallback: `${process.env.PUBLIC_SERVER_URL}/call-status`,
     };
 
@@ -351,10 +352,12 @@ fastify.all("/outbound-call-handler-eleven-labs", async (request, reply) => {
   const system_message = request.query.system_message || "";
   const first_message = request.query.first_message || "";
   const voice_id = request.query.voice_id;
+  const language = request.query.language || "en";
   console.log("[ElevenLabs TeXML Handler] Received parameters:", {
     system_message: system_message.substring(0, 100) + "...",
     first_message,
     voice_id,
+    language,
   });
 
   // XML-encode the parameters
@@ -380,6 +383,7 @@ fastify.all("/outbound-call-handler-eleven-labs", async (request, reply) => {
                 <Parameter name="system_message" value="${xmlEncodedSystemMessage}" />
                 <Parameter name="first_message" value="${xmlEncodedFirstMessage}" />
                 <Parameter name="voice_id" value="${voice_id}" />
+                <Parameter name="language" value="${language}" />
             </Stream>
         </Connect>
     </Response>`;
@@ -437,6 +441,7 @@ fastify.register(async (fastifyInstance) => {
                   first_message:
                     customParameters?.first_message ||
                     "Hello, this is Mary's Dental. How can I help you today?",
+                  language: customParameters?.language || "en",
                 },
                 tts: {
                   voice_id:
