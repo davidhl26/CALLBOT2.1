@@ -220,20 +220,20 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
   let voice_id;
 
   switch (voice) {
-    case "voice_1":
-      voice_id = process.env.ELEVENLABS_VOICE_1;
+    case "voice_english_male_1":
+      voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
       break;
-    case "voice_2":
-      voice_id = process.env.ELEVENLABS_VOICE_2;
+    case "voice_english_male_2":
+      voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_2;
       break;
-    case "voice_3":
-      voice_id = process.env.ELEVENLABS_VOICE_3;
+    case "voice_english_female_1":
+      voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_FEMALE_1;
       break;
-    case "voice_4":
-      voice_id = process.env.ELEVENLABS_VOICE_4;
+    case "voice_french_male_1":
+      voice_id = process.env.ELEVENLABS_VOICE_FRENCH_MALE_1;
       break;
     default:
-      voice_id = process.env.ELEVENLABS_VOICE_1;
+      voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
       break;
   }
 
