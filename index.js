@@ -273,7 +273,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
       to_number: to,
       campaign_id,
       contact_id,
-      provider: "elevenlabs",
+      provider: "eleven_labs",
     });
 
     const call = await Call.create({
@@ -285,7 +285,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
       contact_id,
       system_message,
       first_message,
-      provider: "elevenlabs",
+      provider: "eleven_labs",
     });
 
     console.log("ElevenLabs call record created:", call.toJSON());
