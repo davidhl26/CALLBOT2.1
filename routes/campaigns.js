@@ -22,7 +22,14 @@ export default async function campaignRoutes(fastify, options) {
   // Create a new campaign
   fastify.post("/", async (request, reply) => {
     try {
-      const { name, numbers, telnyx_numbers, system_message } = request.body;
+      const {
+        name,
+        numbers,
+        telnyx_numbers,
+        system_message,
+        first_message,
+        ai_provider,
+      } = request.body;
 
       // Create campaign with all initial numbers
       const campaign = await Campaign.create({
@@ -31,6 +38,8 @@ export default async function campaignRoutes(fastify, options) {
         numbers_to_call: numbers, // Initially, all numbers need to be called
         telnyx_numbers,
         system_message,
+        first_message,
+        ai_provider,
         status: "pending",
         total_calls: numbers.length,
       });
@@ -587,6 +596,8 @@ export default async function campaignRoutes(fastify, options) {
       let name;
       let telnyxNumbers;
       let systemMessage;
+      let firstMessage;
+      let aiProvider;
 
       // Process all parts of the multipart form
       for await (const part of request.parts()) {
@@ -604,15 +615,28 @@ export default async function campaignRoutes(fastify, options) {
             case "system_message":
               systemMessage = part.value;
               break;
+            case "first_message":
+              firstMessage = part.value;
+              break;
+            case "ai_provider":
+              aiProvider = part.value;
+              break;
           }
         }
       }
 
       // Validate required fields
-      if (!csvFile || !name || !telnyxNumbers || !systemMessage) {
+      if (
+        !csvFile ||
+        !name ||
+        !telnyxNumbers ||
+        !systemMessage ||
+        !firstMessage ||
+        !aiProvider
+      ) {
         return reply.code(400).send({
           error:
-            "Missing required fields: file, name, telnyx_numbers, system_message",
+            "Missing required fields: file, name, telnyx_numbers, system_message, first_message, ai_provider",
         });
       }
 
@@ -647,6 +671,8 @@ export default async function campaignRoutes(fastify, options) {
         numbers_to_call: phoneNumbers,
         telnyx_numbers: telnyxNumbers,
         system_message: systemMessage,
+        first_message: firstMessage,
+        ai_provider: aiProvider,
         status: "pending",
         total_calls: phoneNumbers.length,
       });

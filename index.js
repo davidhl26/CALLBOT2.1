@@ -130,7 +130,7 @@ fastify.all("/incoming-call", async (request, reply) => {
 });
 
 // Route for initiating outbound calls
-fastify.post("/initiate-call", async (request, reply) => {
+fastify.post("/initiate-call-real-time-api", async (request, reply) => {
   console.log("Initiating call with:", request.body);
   const { to, from, system_message, campaign_id, contact_id } = request.body;
 
@@ -140,7 +140,7 @@ fastify.post("/initiate-call", async (request, reply) => {
       From: from,
       UrlMethod: "GET",
       Record: "true",
-      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler`,
+      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-real-time-api`,
       StatusCallback: `${process.env.PUBLIC_SERVER_URL}/call-status`,
     };
 
@@ -303,7 +303,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
 });
 
 // TeXML handler for outbound calls
-fastify.all("/outbound-call-handler", async (request, reply) => {
+fastify.all("/outbound-call-handler-real-time-api", async (request, reply) => {
   console.log("🚀 ~ fastify.all ~ request-header-host:", request.headers.host);
   const websocketURL = `wss://${request.headers.host}/media-stream`;
   console.log("🚀 ~ fastify.all ~ websocket:", websocketURL);
@@ -665,418 +665,424 @@ fastify.register(async (fastifyInstance) => {
 const generateSessionId = () => uuidv4().substring(0, 8);
 // Deepgram and groq media stream
 fastify.register(async (fastify) => {
-  fastify.get("/media-stream2", { websocket: true }, (connection, req) => {
-    const sessionId = generateSessionId();
-    let lastActivity = Date.now();
-    let isClosing = false;
-    let isCallActive = true;
-    let sttReady = false;
-    let ttsReady = false;
-    let audioBuffer = []; // Buffer for audio during initialization
+  fastify.get(
+    "/media-stream-groq-deepgram",
+    { websocket: true },
+    (connection, req) => {
+      const sessionId = generateSessionId();
+      let lastActivity = Date.now();
+      let isClosing = false;
+      let isCallActive = true;
+      let sttReady = false;
+      let ttsReady = false;
+      let audioBuffer = []; // Buffer for audio during initialization
 
-    // Add conversation history array
-    let conversationHistory = [{ role: "system", content: SYSTEM_MESSAGE }];
+      // Add conversation history array
+      let conversationHistory = [{ role: "system", content: SYSTEM_MESSAGE }];
 
-    const logger = {
-      info: (message) => console.log(`[${sessionId}] ${message}`),
-      error: (message) => console.error(`[${sessionId}] ERROR: ${message}`),
-      debug: (message) => console.debug(`[${sessionId}] DEBUG: ${message}`),
-    };
+      const logger = {
+        info: (message) => console.log(`[${sessionId}] ${message}`),
+        error: (message) => console.error(`[${sessionId}] ERROR: ${message}`),
+        debug: (message) => console.debug(`[${sessionId}] DEBUG: ${message}`),
+      };
 
-    logger.info("New WebSocket connection established");
+      logger.info("New WebSocket connection established");
 
-    const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
-    let sttConnection;
-    let ttsConnection;
-    let activityCheckInterval;
+      const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+      let sttConnection;
+      let ttsConnection;
+      let activityCheckInterval;
 
-    // Activity monitoring to prevent automatic disconnects
-    const resetActivityTimer = () => {
-      lastActivity = Date.now();
-      if (!activityCheckInterval) {
-        activityCheckInterval = setInterval(() => {
-          if (Date.now() - lastActivity > 30000) {
-            logger.error("Inactivity timeout - closing connection");
-            safeClose();
-          }
-        }, 5000);
-      }
-    };
-
-    const safeClose = () => {
-      if (isClosing) return;
-      isClosing = true;
-
-      logger.info("Starting graceful shutdown");
-      clearInterval(activityCheckInterval);
-
-      try {
-        if (sttConnection?.getReadyState() === 1) {
-          sttConnection.finish();
-          logger.debug("Deepgram STT connection closed");
+      // Activity monitoring to prevent automatic disconnects
+      const resetActivityTimer = () => {
+        lastActivity = Date.now();
+        if (!activityCheckInterval) {
+          activityCheckInterval = setInterval(() => {
+            if (Date.now() - lastActivity > 30000) {
+              logger.error("Inactivity timeout - closing connection");
+              safeClose();
+            }
+          }, 5000);
         }
-      } catch (error) {
-        logger.error("Error closing Deepgram STT connection: " + error.message);
-      }
+      };
 
-      try {
+      const safeClose = () => {
+        if (isClosing) return;
+        isClosing = true;
+
+        logger.info("Starting graceful shutdown");
+        clearInterval(activityCheckInterval);
+
+        try {
+          if (sttConnection?.getReadyState() === 1) {
+            sttConnection.finish();
+            logger.debug("Deepgram STT connection closed");
+          }
+        } catch (error) {
+          logger.error(
+            "Error closing Deepgram STT connection: " + error.message
+          );
+        }
+
+        try {
+          if (ttsConnection?.getReadyState() === 1) {
+            // Send Close message to properly close the TTS connection
+            ttsConnection.send(JSON.stringify({ type: "Close" }));
+            ttsReady = false;
+            logger.debug("Sent Close message to TTS connection");
+          }
+        } catch (error) {
+          logger.error("Error closing TTS connection: " + error.message);
+          ttsReady = false;
+        }
+
+        try {
+          if (connection.readyState === WebSocket.OPEN) {
+            connection.close();
+            logger.debug("WebSocket connection closed");
+          }
+        } catch (error) {
+          logger.error("Error closing WebSocket: " + error.message);
+        }
+
+        logger.info("Connection fully closed");
+      };
+
+      const stopBotResponse = () => {
         if (ttsConnection?.getReadyState() === 1) {
-          // Send Close message to properly close the TTS connection
-          ttsConnection.send(JSON.stringify({ type: "Close" }));
-          ttsReady = false;
-          logger.debug("Sent Close message to TTS connection");
+          try {
+            // Send Clear to stop pending audio immediately
+            ttsConnection.send(JSON.stringify({ type: "Clear" }));
+            // ttsConnection.send(JSON.stringify({ type: "Flush" }));
+            logger.info("Bot response interrupted");
+          } catch (error) {
+            logger.error("Error stopping TTS: " + error.message);
+          }
         }
-      } catch (error) {
-        logger.error("Error closing TTS connection: " + error.message);
-        ttsReady = false;
-      }
+      };
 
-      try {
-        if (connection.readyState === WebSocket.OPEN) {
-          connection.close();
-          logger.debug("WebSocket connection closed");
+      // Add the sendTTSResponse function
+      const sendTTSResponse = (text) => {
+        if (!text) {
+          logger.info("Skipping TTS response as user is speaking.");
+          return;
         }
-      } catch (error) {
-        logger.error("Error closing WebSocket: " + error.message);
-      }
 
-      logger.info("Connection fully closed");
-    };
+        if (!ttsReady || ttsConnection.getReadyState() !== 1 || !isCallActive) {
+          logger.error(
+            `Cannot send TTS: ready=${ttsReady}, connection=${ttsConnection?.getReadyState()}, active=${isCallActive}`
+          );
+          return;
+        }
 
-    const stopBotResponse = () => {
-      if (ttsConnection?.getReadyState() === 1) {
+        logger.debug("Sending text to Deepgram TTS");
+
         try {
-          // Send Clear to stop pending audio immediately
-          ttsConnection.send(JSON.stringify({ type: "Clear" }));
-          // ttsConnection.send(JSON.stringify({ type: "Flush" }));
-          logger.info("Bot response interrupted");
+          ttsConnection.sendText(text);
+          ttsConnection.send(JSON.stringify({ type: "Flush" }));
         } catch (error) {
-          logger.error("Error stopping TTS: " + error.message);
+          logger.error("Error sending TTS:", error);
         }
-      }
-    };
+      };
 
-    // Add the sendTTSResponse function
-    const sendTTSResponse = (text) => {
-      if (!text) {
-        logger.info("Skipping TTS response as user is speaking.");
-        return;
-      }
+      // Initialize Deepgram connections with retry logic
+      const initSTT = () => {
+        try {
+          // Initialize both connections in parallel
+          const initPromises = [];
 
-      if (!ttsReady || ttsConnection.getReadyState() !== 1 || !isCallActive) {
-        logger.error(
-          `Cannot send TTS: ready=${ttsReady}, connection=${ttsConnection?.getReadyState()}, active=${isCallActive}`
-        );
-        return;
-      }
-
-      logger.debug("Sending text to Deepgram TTS");
-
-      try {
-        ttsConnection.sendText(text);
-        ttsConnection.send(JSON.stringify({ type: "Flush" }));
-      } catch (error) {
-        logger.error("Error sending TTS:", error);
-      }
-    };
-
-    // Initialize Deepgram connections with retry logic
-    const initSTT = () => {
-      try {
-        // Initialize both connections in parallel
-        const initPromises = [];
-
-        // Initialize TTS connection
-        logger.debug("Initializing Deepgram TTS connection");
-        ttsConnection = deepgram.speak.live({
-          model: "aura-asteria-en",
-          voice: "male",
-          encoding: "mulaw",
-          sample_rate: 8000,
-          container: "none",
-          volume: 2.0,
-        });
-
-        const ttsPromise = new Promise((resolve) => {
-          ttsConnection.on(LiveTTSEvents.Open, () => {
-            logger.info("Deepgram TTS connection established");
-            ttsReady = true;
-            resolve();
+          // Initialize TTS connection
+          logger.debug("Initializing Deepgram TTS connection");
+          ttsConnection = deepgram.speak.live({
+            model: "aura-asteria-en",
+            voice: "male",
+            encoding: "mulaw",
+            sample_rate: 8000,
+            container: "none",
+            volume: 2.0,
           });
 
-          // Listen for the Cleared event
-          ttsConnection.on(LiveTTSEvents.Clear, (data) => {
-            console.log("Buffer cleared successfully", data);
-            // Now you can be sure the previous audio generation has stopped
+          const ttsPromise = new Promise((resolve) => {
+            ttsConnection.on(LiveTTSEvents.Open, () => {
+              logger.info("Deepgram TTS connection established");
+              ttsReady = true;
+              resolve();
+            });
+
+            // Listen for the Cleared event
+            ttsConnection.on(LiveTTSEvents.Clear, (data) => {
+              console.log("Buffer cleared successfully", data);
+              // Now you can be sure the previous audio generation has stopped
+            });
+
+            ttsConnection.on(LiveTTSEvents.Flushed, () => {
+              logger.info("TTS stream flushed");
+            });
+          });
+          initPromises.push(ttsPromise);
+
+          // Initialize STT connection
+          logger.debug("Initializing Deepgram STT connection");
+          sttConnection = deepgram.listen.live({
+            model: "nova-2-phonecall",
+            language: "en-US",
+            smart_format: true,
+            encoding: "mulaw",
+            sample_rate: 8000,
+            channels: 1,
+            interim_results: true,
+            endpointing: 300,
+            utterance_end_ms: 1500,
+            punctuate: true,
+            vad_events: true,
           });
 
-          ttsConnection.on(LiveTTSEvents.Flushed, () => {
-            logger.info("TTS stream flushed");
+          const sttPromise = new Promise((resolve) => {
+            sttConnection.on(LiveTranscriptionEvents.Open, () => {
+              logger.info("Deepgram STT connection established");
+              sttReady = true;
+              resolve();
+            });
           });
-        });
-        initPromises.push(ttsPromise);
+          initPromises.push(sttPromise);
 
-        // Initialize STT connection
-        logger.debug("Initializing Deepgram STT connection");
-        sttConnection = deepgram.listen.live({
-          model: "nova-2-phonecall",
-          language: "en-US",
-          smart_format: true,
-          encoding: "mulaw",
-          sample_rate: 8000,
-          channels: 1,
-          interim_results: true,
-          endpointing: 300,
-          utterance_end_ms: 1500,
-          punctuate: true,
-          vad_events: true,
-        });
+          // Wait for both connections to be ready
+          Promise.all(initPromises).then(() => {
+            logger.info("All Deepgram connections established");
 
-        const sttPromise = new Promise((resolve) => {
-          sttConnection.on(LiveTranscriptionEvents.Open, () => {
-            logger.info("Deepgram STT connection established");
-            sttReady = true;
-            resolve();
+            // Process any buffered audio
+            if (audioBuffer.length > 0) {
+              logger.debug(
+                `Processing ${audioBuffer.length} buffered audio chunks`
+              );
+              audioBuffer.forEach((chunk) => {
+                if (sttConnection.getReadyState() === 1) {
+                  sttConnection.send(chunk);
+                }
+              });
+              audioBuffer = [];
+            }
           });
-        });
-        initPromises.push(sttPromise);
 
-        // Wait for both connections to be ready
-        Promise.all(initPromises).then(() => {
-          logger.info("All Deepgram connections established");
+          // Set up TTS event handlers
+          ttsConnection.on(LiveTTSEvents.Audio, (data) => {
+            if (!data || data.length === 0 || !isCallActive) {
+              logger.debug(
+                "Skipping audio data (empty, interrupted, or call ended)"
+              );
+              return;
+            }
 
-          // Process any buffered audio
-          if (audioBuffer.length > 0) {
-            logger.debug(
-              `Processing ${audioBuffer.length} buffered audio chunks`
-            );
-            audioBuffer.forEach((chunk) => {
-              if (sttConnection.getReadyState() === 1) {
-                sttConnection.send(chunk);
+            try {
+              const buffer = Buffer.from(data);
+              const base64Data = buffer.toString("base64");
+              const audioDelta = {
+                event: "media",
+                media: {
+                  payload: base64Data,
+                },
+              };
+
+              // Only send if not interrupted
+              if (connection.readyState === WebSocket.OPEN) {
+                connection.send(JSON.stringify(audioDelta));
+                logger.debug("Sent TTS audio chunk to Telnyx");
+              } else {
+                logger.debug("Skipping audio chunk due to interruption");
               }
-            });
-            audioBuffer = [];
-          }
-        });
-
-        // Set up TTS event handlers
-        ttsConnection.on(LiveTTSEvents.Audio, (data) => {
-          if (!data || data.length === 0 || !isCallActive) {
-            logger.debug(
-              "Skipping audio data (empty, interrupted, or call ended)"
-            );
-            return;
-          }
-
-          try {
-            const buffer = Buffer.from(data);
-            const base64Data = buffer.toString("base64");
-            const audioDelta = {
-              event: "media",
-              media: {
-                payload: base64Data,
-              },
-            };
-
-            // Only send if not interrupted
-            if (connection.readyState === WebSocket.OPEN) {
-              connection.send(JSON.stringify(audioDelta));
-              logger.debug("Sent TTS audio chunk to Telnyx");
-            } else {
-              logger.debug("Skipping audio chunk due to interruption");
+            } catch (error) {
+              logger.error("Error sending TTS:", error);
             }
-          } catch (error) {
-            logger.error("Error sending TTS:", error);
-          }
-        });
+          });
 
-        ttsConnection.on(LiveTTSEvents.Error, (err) => {
-          logger.error("Deepgram TTS error:", err);
-        });
+          ttsConnection.on(LiveTTSEvents.Error, (err) => {
+            logger.error("Deepgram TTS error:", err);
+          });
 
-        ttsConnection.on(LiveTTSEvents.Close, () => {
-          logger.info("Deepgram TTS connection closed");
-          ttsReady = false;
-        });
+          ttsConnection.on(LiveTTSEvents.Close, () => {
+            logger.info("Deepgram TTS connection closed");
+            ttsReady = false;
+          });
 
-        // Handle speech events
-        sttConnection.on(LiveTranscriptionEvents.SpeechStarted, () => {
-          logger.info("Speech started");
-          stopBotResponse();
-        });
+          // Handle speech events
+          sttConnection.on(LiveTranscriptionEvents.SpeechStarted, () => {
+            logger.info("Speech started");
+            stopBotResponse();
+          });
 
-        sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
-          logger.info("Utterance ended");
-        });
+          sttConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+            logger.info("Utterance ended");
+          });
 
-        sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
-          try {
-            resetActivityTimer();
-            const text = data.channel.alternatives[0]?.transcript;
-            const confidence = data.channel.alternatives[0]?.confidence || 0;
+          sttConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
+            try {
+              resetActivityTimer();
+              const text = data.channel.alternatives[0]?.transcript;
+              const confidence = data.channel.alternatives[0]?.confidence || 0;
 
-            if (!text?.trim() || confidence < 0.1) {
+              if (!text?.trim() || confidence < 0.1) {
+                logger.debug(
+                  `Ignored low quality transcript (${confidence}): "${text}"`
+                );
+                return;
+              }
+
+              if (data.speech_final) {
+                logger.info(`Speech final detected: "${text}"`);
+                logger.debug("Processing transcript...");
+                await processTranscript(text);
+              }
+            } catch (error) {
+              logger.error(`Processing transcript error: ${error.message}`);
+              if (error.response) {
+                logger.debug(
+                  `Deepgram STT API Error Details: ${JSON.stringify(
+                    error.response.data
+                  )}`
+                );
+              }
+            }
+          });
+
+          // Helper function to process complete transcripts
+          async function processTranscript(text) {
+            if (!text || !isCallActive) {
               logger.debug(
-                `Ignored low quality transcript (${confidence}): "${text}"`
+                `Skipping processing: text=${!!text}, callActive=${isCallActive}`
               );
               return;
             }
 
-            if (data.speech_final) {
-              logger.info(`Speech final detected: "${text}"`);
-              logger.debug("Processing transcript...");
-              await processTranscript(text);
-            }
-          } catch (error) {
-            logger.error(`Processing transcript error: ${error.message}`);
-            if (error.response) {
+            logger.info(`Processing transcript: "${text}"`);
+
+            try {
+              const groq = new Groq({
+                apiKey: process.env.GROQ_API_KEY,
+              });
+
+              // Add user's message to history
+              conversationHistory.push({ role: "user", content: text });
+
+              // Keep only last 10 messages to prevent context from getting too long
+              if (conversationHistory.length > 11) {
+                // 1 system message + 10 conversation messages
+                conversationHistory = [
+                  conversationHistory[0], // Keep system message
+                  ...conversationHistory.slice(-10), // Keep last 10 messages
+                ];
+              }
+
+              logger.debug("Sending to Groq...");
+              const llmResponse = await groq.chat.completions.create({
+                model: "mixtral-8x7b-32768",
+                messages: conversationHistory,
+                temperature: 0.7,
+                max_completion_tokens: 50,
+                top_p: 0.8,
+              });
+
+              const responseText = llmResponse.choices[0]?.message?.content;
+              if (!responseText) {
+                logger.error("Empty response from Groq");
+                return;
+              }
+
+              // Add assistant's response to history
+              conversationHistory.push({
+                role: "assistant",
+                content: responseText,
+              });
+
+              logger.info(`LLM Response: "${responseText}"`);
               logger.debug(
-                `Deepgram STT API Error Details: ${JSON.stringify(
-                  error.response.data
-                )}`
+                "Current conversation length: " + conversationHistory.length
               );
+
+              // Check if call is still active before responding
+              if (!isCallActive) {
+                logger.debug("Call ended, skipping response");
+                return;
+              }
+
+              // Add a small natural pause before responding
+              await new Promise((resolve) => setTimeout(resolve, 300));
+
+              // Send the response using TTS
+              sendTTSResponse(responseText);
+            } catch (error) {
+              logger.error(`Processing error: ${error.message}`);
+              if (error.response) {
+                logger.debug(
+                  `API Error Details: ${JSON.stringify(error.response.data)}`
+                );
+              }
             }
           }
-        });
-
-        // Helper function to process complete transcripts
-        async function processTranscript(text) {
-          if (!text || !isCallActive) {
-            logger.debug(
-              `Skipping processing: text=${!!text}, callActive=${isCallActive}`
-            );
-            return;
-          }
-
-          logger.info(`Processing transcript: "${text}"`);
-
-          try {
-            const groq = new Groq({
-              apiKey: process.env.GROQ_API_KEY,
-            });
-
-            // Add user's message to history
-            conversationHistory.push({ role: "user", content: text });
-
-            // Keep only last 10 messages to prevent context from getting too long
-            if (conversationHistory.length > 11) {
-              // 1 system message + 10 conversation messages
-              conversationHistory = [
-                conversationHistory[0], // Keep system message
-                ...conversationHistory.slice(-10), // Keep last 10 messages
-              ];
-            }
-
-            logger.debug("Sending to Groq...");
-            const llmResponse = await groq.chat.completions.create({
-              model: "mixtral-8x7b-32768",
-              messages: conversationHistory,
-              temperature: 0.7,
-              max_completion_tokens: 50,
-              top_p: 0.8,
-            });
-
-            const responseText = llmResponse.choices[0]?.message?.content;
-            if (!responseText) {
-              logger.error("Empty response from Groq");
-              return;
-            }
-
-            // Add assistant's response to history
-            conversationHistory.push({
-              role: "assistant",
-              content: responseText,
-            });
-
-            logger.info(`LLM Response: "${responseText}"`);
-            logger.debug(
-              "Current conversation length: " + conversationHistory.length
-            );
-
-            // Check if call is still active before responding
-            if (!isCallActive) {
-              logger.debug("Call ended, skipping response");
-              return;
-            }
-
-            // Add a small natural pause before responding
-            await new Promise((resolve) => setTimeout(resolve, 300));
-
-            // Send the response using TTS
-            sendTTSResponse(responseText);
-          } catch (error) {
-            logger.error(`Processing error: ${error.message}`);
-            if (error.response) {
-              logger.debug(
-                `API Error Details: ${JSON.stringify(error.response.data)}`
-              );
-            }
-          }
-        }
-      } catch (error) {
-        logger.error(`Initialization failed: ${error.message}`);
-        safeClose();
-      }
-    };
-
-    // Start the initialization
-    initSTT();
-
-    // Handle Telnyx media
-    connection.on("message", (message) => {
-      try {
-        resetActivityTimer();
-        const data = JSON.parse(message);
-
-        if (data.event === "media") {
-          try {
-            const audioChunk = Buffer.from(data.media.payload, "base64");
-
-            if (sttReady) {
-              // Send audio directly when ready
-              sttConnection.send(audioChunk);
-            } else {
-              logger.error("Deepgram STT connection not ready");
-            }
-          } catch (error) {
-            logger.error(`Error handling audio: ${error.message}`);
-          }
-        }
-      } catch (error) {
-        logger.error(`Message handling error: ${error.message}`);
-        safeClose();
-      }
-    });
-
-    // Handle connection close
-    connection.on("close", (code, reason) => {
-      logger.info(`WebSocket closed (${code}) - ${reason.toString()}`);
-      isCallActive = false; // Mark call as inactive
-      safeClose();
-    });
-
-    connection.on("error", (error) => {
-      logger.error(`WebSocket error: ${error.message}`);
-      safeClose();
-    });
-
-    // Send periodic keep-alive messages
-    const keepAliveInterval = setInterval(() => {
-      if (connection.readyState === WebSocket.OPEN) {
-        try {
-          connection.send(JSON.stringify({ event: "keepalive" }));
-          logger.debug("Sent keep-alive message");
         } catch (error) {
-          logger.error("Keep-alive failed: " + error.message);
+          logger.error(`Initialization failed: ${error.message}`);
+          safeClose();
         }
-      }
-    }, 15000);
+      };
 
-    // Cleanup intervals on close
-    connection.on("close", () => {
-      clearInterval(keepAliveInterval);
-    });
-  });
+      // Start the initialization
+      initSTT();
+
+      // Handle Telnyx media
+      connection.on("message", (message) => {
+        try {
+          resetActivityTimer();
+          const data = JSON.parse(message);
+
+          if (data.event === "media") {
+            try {
+              const audioChunk = Buffer.from(data.media.payload, "base64");
+
+              if (sttReady) {
+                // Send audio directly when ready
+                sttConnection.send(audioChunk);
+              } else {
+                logger.error("Deepgram STT connection not ready");
+              }
+            } catch (error) {
+              logger.error(`Error handling audio: ${error.message}`);
+            }
+          }
+        } catch (error) {
+          logger.error(`Message handling error: ${error.message}`);
+          safeClose();
+        }
+      });
+
+      // Handle connection close
+      connection.on("close", (code, reason) => {
+        logger.info(`WebSocket closed (${code}) - ${reason.toString()}`);
+        isCallActive = false; // Mark call as inactive
+        safeClose();
+      });
+
+      connection.on("error", (error) => {
+        logger.error(`WebSocket error: ${error.message}`);
+        safeClose();
+      });
+
+      // Send periodic keep-alive messages
+      const keepAliveInterval = setInterval(() => {
+        if (connection.readyState === WebSocket.OPEN) {
+          try {
+            connection.send(JSON.stringify({ event: "keepalive" }));
+            logger.debug("Sent keep-alive message");
+          } catch (error) {
+            logger.error("Keep-alive failed: " + error.message);
+          }
+        }
+      }, 15000);
+
+      // Cleanup intervals on close
+      connection.on("close", () => {
+        clearInterval(keepAliveInterval);
+      });
+    }
+  );
 });
 
 // Call status webhook handler
@@ -1195,123 +1201,129 @@ fastify.post("/call-status", async (request, reply) => {
   }
 });
 
-// WebSocket route for media-stream
+// WebSocket route for media-stream for real-time-api
 fastify.register(async (fastify) => {
-  fastify.get("/media-stream", { websocket: true }, (connection, req) => {
-    console.log("Client connected");
+  fastify.get(
+    "/media-stream-real-time-api",
+    { websocket: true },
+    (connection, req) => {
+      console.log("Client connected");
 
-    const openAiWs = new WebSocket(
-      "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01",
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "realtime=v1",
-        },
-      }
-    );
+      const openAiWs = new WebSocket(
+        "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01",
+        {
+          headers: {
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+            "OpenAI-Beta": "realtime=v1",
+          },
+        }
+      );
 
-    let streamSid = null;
+      let streamSid = null;
 
-    const sendSessionUpdate = () => {
-      const sessionUpdate = {
-        type: "session.update",
-        session: {
-          turn_detection: { type: "server_vad" },
-          input_audio_format: "g711_ulaw",
-          output_audio_format: "g711_ulaw",
-          voice: VOICE,
-          instructions: SYSTEM_MESSAGE,
-          modalities: ["text", "audio"],
-          temperature: 0.8,
-        },
+      const sendSessionUpdate = () => {
+        const sessionUpdate = {
+          type: "session.update",
+          session: {
+            turn_detection: { type: "server_vad" },
+            input_audio_format: "g711_ulaw",
+            output_audio_format: "g711_ulaw",
+            voice: VOICE,
+            instructions: SYSTEM_MESSAGE,
+            modalities: ["text", "audio"],
+            temperature: 0.8,
+          },
+        };
+
+        console.log("Sending session update:", JSON.stringify(sessionUpdate));
+        openAiWs.send(JSON.stringify(sessionUpdate));
       };
 
-      console.log("Sending session update:", JSON.stringify(sessionUpdate));
-      openAiWs.send(JSON.stringify(sessionUpdate));
-    };
+      // Open event for OpenAI WebSocket
+      openAiWs.on("open", () => {
+        console.log("Connected to the OpenAI Realtime API");
+        setTimeout(sendSessionUpdate, 250); // Ensure connection stability, send after .25 seconds
+      });
 
-    // Open event for OpenAI WebSocket
-    openAiWs.on("open", () => {
-      console.log("Connected to the OpenAI Realtime API");
-      setTimeout(sendSessionUpdate, 250); // Ensure connection stability, send after .25 seconds
-    });
+      // Listen for messages from the OpenAI WebSocket (and send to Telnyx if necessary)
+      openAiWs.on("message", (data) => {
+        try {
+          const response = JSON.parse(data);
 
-    // Listen for messages from the OpenAI WebSocket (and send to Telnyx if necessary)
-    openAiWs.on("message", (data) => {
-      try {
-        const response = JSON.parse(data);
+          if (LOG_EVENT_TYPES.includes(response.type)) {
+            console.log(`Received event: ${response.type}`, response);
+          }
 
-        if (LOG_EVENT_TYPES.includes(response.type)) {
-          console.log(`Received event: ${response.type}`, response);
+          if (response.type === "session.updated") {
+            console.log("Session updated successfully:", response);
+          }
+
+          if (response.type === "response.audio.delta" && response.delta) {
+            const audioDelta = {
+              event: "media",
+              media: {
+                payload: Buffer.from(response.delta, "base64").toString(
+                  "base64"
+                ),
+              },
+            };
+            connection.send(JSON.stringify(audioDelta));
+          }
+        } catch (error) {
+          console.error(
+            "Error processing OpenAI message:",
+            error,
+            "Raw message:",
+            data
+          );
         }
+      });
 
-        if (response.type === "session.updated") {
-          console.log("Session updated successfully:", response);
+      // Handle incoming messages from Telnyx
+      connection.on("message", (message) => {
+        try {
+          const data = JSON.parse(message);
+
+          switch (data.event) {
+            case "media":
+              if (openAiWs.readyState === WebSocket.OPEN) {
+                const audioAppend = {
+                  type: "input_audio_buffer.append",
+                  audio: data.media.payload,
+                };
+
+                openAiWs.send(JSON.stringify(audioAppend));
+              }
+              break;
+            case "start":
+              streamSid = data.stream_id;
+              console.log("Incoming stream has started", streamSid);
+              break;
+            default:
+              console.log("Received non-media event:", data.event);
+              break;
+          }
+        } catch (error) {
+          console.error("Error parsing message:", error, "Message:", message);
         }
+      });
 
-        if (response.type === "response.audio.delta" && response.delta) {
-          const audioDelta = {
-            event: "media",
-            media: {
-              payload: Buffer.from(response.delta, "base64").toString("base64"),
-            },
-          };
-          connection.send(JSON.stringify(audioDelta));
-        }
-      } catch (error) {
-        console.error(
-          "Error processing OpenAI message:",
-          error,
-          "Raw message:",
-          data
-        );
-      }
-    });
+      // Handle connection close
+      connection.on("close", () => {
+        if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
+        console.log("Client disconnected.");
+      });
 
-    // Handle incoming messages from Telnyx
-    connection.on("message", (message) => {
-      try {
-        const data = JSON.parse(message);
+      // Handle WebSocket close and errors
+      openAiWs.on("close", () => {
+        console.log("Disconnected from the OpenAI Realtime API");
+      });
 
-        switch (data.event) {
-          case "media":
-            if (openAiWs.readyState === WebSocket.OPEN) {
-              const audioAppend = {
-                type: "input_audio_buffer.append",
-                audio: data.media.payload,
-              };
-
-              openAiWs.send(JSON.stringify(audioAppend));
-            }
-            break;
-          case "start":
-            streamSid = data.stream_id;
-            console.log("Incoming stream has started", streamSid);
-            break;
-          default:
-            console.log("Received non-media event:", data.event);
-            break;
-        }
-      } catch (error) {
-        console.error("Error parsing message:", error, "Message:", message);
-      }
-    });
-
-    // Handle connection close
-    connection.on("close", () => {
-      if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
-      console.log("Client disconnected.");
-    });
-
-    // Handle WebSocket close and errors
-    openAiWs.on("close", () => {
-      console.log("Disconnected from the OpenAI Realtime API");
-    });
-
-    openAiWs.on("error", (error) => {
-      console.error("Error in the OpenAI WebSocket:", error);
-    });
-  });
+      openAiWs.on("error", (error) => {
+        console.error("Error in the OpenAI WebSocket:", error);
+      });
+    }
+  );
 });
 
 // Test database connection

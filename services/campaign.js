@@ -10,22 +10,32 @@ async function makeCallWithRetry(
   toNumber,
   fromNumber,
   systemMessage,
+  firstMessage,
+  aiProvider,
   campaignId,
   contactId,
   retries = 0
 ) {
   try {
+    //determinne endpoint based on aiProvider
+    let endpoint;
+    if (aiProvider === "eleven_labs") {
+      endpoint = `${process.env.PUBLIC_SERVER_URL}/initiate-call-eleven-labs`;
+    } else if (aiProvider === "real-time-api") {
+      endpoint = `${process.env.PUBLIC_SERVER_URL}/initiate-call-real-time-api`;
+    } else if (aiProvider === "groq+deepgram") {
+      endpoint = `${process.env.PUBLIC_SERVER_URL}/initiate-call-groq-deepgram`;
+    }
     // First try the local endpoint
-    const response = await axios.post(
-      `${process.env.PUBLIC_SERVER_URL}/initiate-call`,
-      {
-        to: toNumber,
-        from: fromNumber,
-        system_message: systemMessage,
-        campaign_id: campaignId,
-        contact_id: contactId,
-      }
-    );
+    const response = await axios.post(endpoint, {
+      to: toNumber,
+      from: fromNumber,
+      system_message: systemMessage,
+      first_message: firstMessage,
+      ai_provider: aiProvider,
+      campaign_id: campaignId,
+      contact_id: contactId,
+    });
     return { success: true, data: response.data };
   } catch (error) {
     console.error(
@@ -44,6 +54,8 @@ async function makeCallWithRetry(
         toNumber,
         fromNumber,
         systemMessage,
+        firstMessage,
+        aiProvider,
         campaignId,
         contactId,
         retries + 1
@@ -110,6 +122,8 @@ async function processCampaignBatch(campaign) {
           toNumber,
           fromNumber,
           campaign.system_message,
+          campaign.first_message,
+          campaign.ai_provider,
           campaign.id,
           contact.id
         );

@@ -17,6 +17,20 @@ const Campaign = sequelize.define(
       type: DataTypes.ENUM("pending", "in_progress", "paused", "completed"),
       defaultValue: "pending",
     },
+    ai_provider: {
+      type: DataTypes.STRING,
+      defaultValue: "eleven_labs",
+      validate: {
+        isIn: {
+          args: [["eleven_labs", "real-time-api", "groq+deepgram"]],
+          msg: "ai_provider must be one of: eleven_labs, real-time-api, groq+deepgram",
+        },
+      },
+    },
+    first_message: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
     last_status: {
       type: DataTypes.STRING,
       allowNull: true,
@@ -61,6 +75,11 @@ const Campaign = sequelize.define(
       type: DataTypes.DECIMAL(10, 4),
       defaultValue: 0,
       comment: "Total cost of all calls",
+    },
+    total_calls: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0,
+      comment: "Total number of calls in this campaign",
     },
   },
   {
