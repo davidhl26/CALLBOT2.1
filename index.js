@@ -419,6 +419,61 @@ fastify.register(async (fastifyInstance) => {
       let elevenLabsWs = null;
       let customParameters = null; // Add this to store parameters
       let callControlId = null;
+      let initialConfigSent = false; // Track if config has been sent
+
+      // Function to send initial config only when we have parameters
+      const sendInitialConfig = () => {
+        if (!elevenLabsWs || elevenLabsWs.readyState !== WebSocket.OPEN) {
+          console.error("[ElevenLabs] Cannot send config - WebSocket not open");
+          return false;
+        }
+
+        if (!customParameters) {
+          console.error(
+            "[ElevenLabs] Cannot send initial config - missing parameters"
+          );
+          return false;
+        }
+
+        if (initialConfigSent) {
+          console.log("[ElevenLabs] Initial config already sent, skipping");
+          return false;
+        }
+
+        const initialConfig = {
+          type: "conversation_initiation_client_data",
+          dynamic_variables: {
+            call_id: callSid || streamSid || "unknown",
+          },
+          conversation_config_override: {
+            agent: {
+              prompt: {
+                prompt: customParameters.system_message,
+              },
+              first_message: customParameters.first_message,
+              language: customParameters.language,
+            },
+            tts: {
+              voice_id: customParameters.voice_id,
+            },
+          },
+        };
+
+        console.log(
+          "[ElevenLabs] Sending initial config with prompt:",
+          initialConfig.conversation_config_override.agent.prompt.prompt
+        );
+        console.log(
+          "[ElevenLabs] Sending initial config with voice_id:",
+          initialConfig.conversation_config_override.tts.voice_id
+        );
+
+        // Send the configuration to ElevenLabs
+        elevenLabsWs.send(JSON.stringify(initialConfig));
+        initialConfigSent = true;
+        return true;
+      };
+
       // Handle WebSocket errors
       ws.on("error", (error) => {
         console.error("[Telnyx] WebSocket error:", error);
@@ -440,39 +495,11 @@ fastify.register(async (fastifyInstance) => {
           elevenLabsWs.on("open", () => {
             console.log("[ElevenLabs] Connected to Conversational AI");
 
-            // Send initial configuration with prompt and first message
-            const initialConfig = {
-              type: "conversation_initiation_client_data",
-              dynamic_variables: {
-                call_id: callSid || streamSid || "unknown",
-              },
-
-              conversation_config_override: {
-                agent: {
-                  prompt: {
-                    prompt: customParameters?.system_message,
-                    // prompt: SYSTEM_MESSAGE,
-                  },
-                  first_message: customParameters?.first_message,
-                  language: customParameters?.language,
-                },
-                tts: {
-                  voice_id: customParameters?.voice_id,
-                },
-              },
-            };
-
-            console.log(
-              "[ElevenLabs] Sending initial config with prompt:",
-              initialConfig.conversation_config_override.agent.prompt.prompt
-            );
-            console.log(
-              "[ElevenLabs] Sending initial config with voice_id:",
-              initialConfig.conversation_config_override.tts.voice_id
-            );
-
-            // Send the configuration to ElevenLabs
-            elevenLabsWs.send(JSON.stringify(initialConfig));
+            // Only send the config if we already have customParameters
+            if (customParameters) {
+              sendInitialConfig();
+            }
+            // Otherwise, we'll wait for the 'start' event from Telnyx
           });
 
           const processElevenLabsMessage = (data) => {
@@ -686,6 +713,10 @@ fastify.register(async (fastifyInstance) => {
               );
               console.log("[Telnyx] Start parameters:", customParameters);
 
+              // Now that we have the parameters, send the config if the ElevenLabs connection is open
+              if (elevenLabsWs?.readyState === WebSocket.OPEN) {
+                sendInitialConfig();
+              }
               break;
 
             case "media":
