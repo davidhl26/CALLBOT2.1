@@ -219,57 +219,29 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
     language,
     voice_id,
   } = request.body;
-  console.log("🚀 ~ from initiate-call body ~ voice:", voice);
-  console.log("🚀 ~ from initiate-call body ~ language:", language);
-  console.log("🚀 ~ from initiate-call body ~ system_message:", system_message);
-  console.log("🚀 ~ from initiate-call body ~ first_message:", first_message);
-  console.log("🚀 ~ from initiate-call body ~ voice_id before:", voice_id);
+
   // get voice id from voice
   let voice_id_final = voice_id;
   try {
     if (voice_id === "") {
       switch (voice) {
         case "voice_english_male_1":
-          console.log(
-            "🚀 ~ from initiate-call body ~ voice_english_male_1 id:",
-            process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1
-          );
           voice_id_final = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
           break;
         case "voice_english_male_2":
-          console.log(
-            "🚀 ~ from initiate-call body ~ voice_english_male_2 id:",
-            process.env.ELEVENLABS_VOICE_ENGLISH_MALE_2
-          );
           voice_id_final = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_2;
           break;
         case "voice_english_female_1":
-          console.log(
-            "🚀 ~ from initiate-call body ~ voice_english_female_1 id:",
-            process.env.ELEVENLABS_VOICE_ENGLISH_FEMALE_1
-          );
           voice_id_final = process.env.ELEVENLABS_VOICE_ENGLISH_FEMALE_1;
           break;
         case "voice_french_male_1":
-          console.log(
-            "🚀 ~ from initiate-call body ~ voice_french_male_1 id:",
-            process.env.ELEVENLABS_VOICE_FRENCH_MALE_1
-          );
           voice_id_final = process.env.ELEVENLABS_VOICE_FRENCH_MALE_1;
           break;
         default:
-          console.log(
-            "🚀 ~ from initiate-call body ~ voice_default id:",
-            process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1
-          );
           voice_id_final = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
           break;
       }
     }
-    console.log(
-      "🚀 ~ from initiate-call body ~ voice_id after:",
-      voice_id_final
-    );
   } catch (error) {
     console.error("Error getting voice id:", error);
   }
