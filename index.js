@@ -223,29 +223,56 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
   console.log("🚀 ~ from initiate-call body ~ language:", language);
   console.log("🚀 ~ from initiate-call body ~ system_message:", system_message);
   console.log("🚀 ~ from initiate-call body ~ first_message:", first_message);
-  console.log("🚀 ~ from initiate-call body ~ voice_id:", voice_id);
+  console.log("🚀 ~ from initiate-call body ~ voice_id before:", voice_id);
   // get voice id from voice
-
-  if (!voice_id) {
-    switch (voice) {
-      case "voice_english_male_1":
-        voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
-        break;
-      case "voice_english_male_2":
-        voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_2;
-        break;
-      case "voice_english_female_1":
-        voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_FEMALE_1;
-        break;
-      case "voice_french_male_1":
-        voice_id = process.env.ELEVENLABS_VOICE_FRENCH_MALE_1;
-        break;
-      default:
-        voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
-        break;
+  let voice_id_final = voice_id;
+  try {
+    if (voice_id === "") {
+      switch (voice) {
+        case "voice_english_male_1":
+          console.log(
+            "🚀 ~ from initiate-call body ~ voice_english_male_1 id:",
+            process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1
+          );
+          voice_id_final = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
+          break;
+        case "voice_english_male_2":
+          console.log(
+            "🚀 ~ from initiate-call body ~ voice_english_male_2 id:",
+            process.env.ELEVENLABS_VOICE_ENGLISH_MALE_2
+          );
+          voice_id_final = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_2;
+          break;
+        case "voice_english_female_1":
+          console.log(
+            "🚀 ~ from initiate-call body ~ voice_english_female_1 id:",
+            process.env.ELEVENLABS_VOICE_ENGLISH_FEMALE_1
+          );
+          voice_id_final = process.env.ELEVENLABS_VOICE_ENGLISH_FEMALE_1;
+          break;
+        case "voice_french_male_1":
+          console.log(
+            "🚀 ~ from initiate-call body ~ voice_french_male_1 id:",
+            process.env.ELEVENLABS_VOICE_FRENCH_MALE_1
+          );
+          voice_id_final = process.env.ELEVENLABS_VOICE_FRENCH_MALE_1;
+          break;
+        default:
+          console.log(
+            "🚀 ~ from initiate-call body ~ voice_default id:",
+            process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1
+          );
+          voice_id_final = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
+          break;
+      }
     }
+    console.log(
+      "🚀 ~ from initiate-call body ~ voice_id after:",
+      voice_id_final
+    );
+  } catch (error) {
+    console.error("Error getting voice id:", error);
   }
-
   // Validate required parameters
   if (!to || !from) {
     return reply.code(400).send({
@@ -264,17 +291,15 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
 
   try {
     // Create a safe version of system_message and first_message for URL
-    const encodedSystemMessage = encodeURIComponent(system_message || "");
-    const encodedFirstMessage = encodeURIComponent(
-      first_message || "Hello, this is Mary's Dental. How can I help you today?"
-    );
+    const encodedSystemMessage = encodeURIComponent(system_message);
+    const encodedFirstMessage = encodeURIComponent(first_message);
 
     const data = {
       To: to,
       From: from,
       UrlMethod: "GET",
       Record: "true",
-      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}&voice_id=${voice_id}&language=${language}`,
+      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}&voice_id=${voice_id_final}&language=${language}`,
       StatusCallback: `${process.env.PUBLIC_SERVER_URL}/call-status`,
     };
 
