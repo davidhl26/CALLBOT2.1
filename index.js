@@ -204,6 +204,8 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
     contact_id: request.body.contact_id,
     first_message: request.body.first_message,
     voice: request.body.voice,
+    voice_id: request.body.voice_id,
+    language: request.body.language,
   });
 
   const {
@@ -215,27 +217,33 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
     first_message,
     voice,
     language,
+    voice_id,
   } = request.body;
-  console.log("🚀 ~ fastify.post ~ voice:", voice);
+  console.log("🚀 ~ from initiate-call body ~ voice:", voice);
+  console.log("🚀 ~ from initiate-call body ~ language:", language);
+  console.log("🚀 ~ from initiate-call body ~ system_message:", system_message);
+  console.log("🚀 ~ from initiate-call body ~ first_message:", first_message);
+  console.log("🚀 ~ from initiate-call body ~ voice_id:", voice_id);
   // get voice id from voice
-  let voice_id;
 
-  switch (voice) {
-    case "voice_english_male_1":
-      voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
-      break;
-    case "voice_english_male_2":
-      voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_2;
-      break;
-    case "voice_english_female_1":
-      voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_FEMALE_1;
-      break;
-    case "voice_french_male_1":
-      voice_id = process.env.ELEVENLABS_VOICE_FRENCH_MALE_1;
-      break;
-    default:
-      voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
-      break;
+  if (!voice_id) {
+    switch (voice) {
+      case "voice_english_male_1":
+        voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
+        break;
+      case "voice_english_male_2":
+        voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_2;
+        break;
+      case "voice_english_female_1":
+        voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_FEMALE_1;
+        break;
+      case "voice_french_male_1":
+        voice_id = process.env.ELEVENLABS_VOICE_FRENCH_MALE_1;
+        break;
+      default:
+        voice_id = process.env.ELEVENLABS_VOICE_ENGLISH_MALE_1;
+        break;
+    }
   }
 
   // Validate required parameters
