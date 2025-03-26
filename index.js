@@ -453,15 +453,11 @@ fastify.register(async (fastifyInstance) => {
                     prompt: customParameters?.system_message,
                     // prompt: SYSTEM_MESSAGE,
                   },
-                  first_message:
-                    customParameters?.first_message ||
-                    "Hello, this is Mary's Dental. How can I help you today?",
-                  language: customParameters?.language || "en",
+                  first_message: customParameters?.first_message,
+                  language: customParameters?.language,
                 },
                 tts: {
-                  voice_id:
-                    customParameters?.voice_id ||
-                    process.env.ELEVENLABS_VOICE_1,
+                  voice_id: customParameters?.voice_id,
                 },
               },
             };
