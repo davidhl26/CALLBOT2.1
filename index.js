@@ -76,26 +76,35 @@ Speak casually, like a real person on a phone call—short and to the point.
 - Keep responses **brief** (1-2 sentences max).
 - Use natural conversation fillers: "Umm...", "Well...", "I mean..."
 - Be witty, but **don't ramble**.
-- If booking an appointment, gather info step by step:
-  1. Ask for their full name.
-  2. Ask why they need the appointment.
-  3. Ask for their preferred date and time.
-  4. Confirm all details.
+- If booking an appointment, gather info step by step using a tool call.
 
-💡 Example of ideal response length:
-User: "Hi"
-Assistant: "Hello, this is Mary's Dental. How can I help you today?"
-User: "What are your hours?"
-Assistant: "Oh! We're open 8 AM to 5 PM. Closed Sundays!"
-User: "What are your hours?"
-Assistant: "Oh! We're open 8 to 5. Closed Sundays!"
-User: "Can I book an appointment?"
-Assistant: "Sure! What's your name?"
-User: "I need a cleaning."
-Assistant: "Got it! When works best for you?"
-User: "Tomorrow at 10 AM."
-Assistant: "Perfect! You're all set for 10 AM tomorrow."
+### **Booking Flow (Use \`schedule_appointment\` Tool Call)**
+1. Ask for their full name.  
+2. Ask why they need the appointment.  
+3. Ask for their preferred date and time.  
+4. Call \`schedule_appointment(name, reason, date, time)\` and confirm.  
+
+### **Example Call Handling:**
+**User:** "Hi"  
+**Assistant:** "Hello, this is Mary's Dental. How can I help?"  
+
+**User:** "What are your hours?"  
+**Assistant:** "Oh! We're open 8 AM to 5 PM. Closed Sundays!"  
+
+**User:** "Can I book an appointment?"  
+**Assistant:** "Sure! What's your name?"  
+
+**User:** "John Doe."  
+**Assistant:** "Alright, John! What do you need the appointment for?"  
+
+**User:** "A cleaning."  
+**Assistant:** "Got it! When works best for you?"  
+
+**User:** "Tomorrow at 10 AM."  
+**Assistant (calls \`schedule_appointment("John Doe", "Cleaning", "Tomorrow", "10 AM")\`):**  
+"Perfect! You're all set for 10 AM tomorrow."  
 `;
+
 // console.log("🚀 ~ SYSTEM_MESSAGE:", SYSTEM_MESSAGE);
 const VOICE = process.env.VOICE || "alloy";
 const PORT = process.env.PORT || 8000; // Allow dynamic port assignment
@@ -441,7 +450,8 @@ fastify.register(async (fastifyInstance) => {
               conversation_config_override: {
                 agent: {
                   prompt: {
-                    prompt: customParameters?.system_message || SYSTEM_MESSAGE,
+                    // prompt: customParameters?.system_message || SYSTEM_MESSAGE,
+                    prompt: SYSTEM_MESSAGE,
                   },
                   first_message:
                     customParameters?.first_message ||
@@ -585,12 +595,37 @@ fastify.register(async (fastifyInstance) => {
                   console.log(
                     `[ElevenLabs] Tool request: ${message.tool_request?.tool_name}`
                   );
+                  console.log(
+                    `[ElevenLabs] Tool request all: ${message.tool_request}`
+                  );
                   break;
 
                 case "client_tool_call":
                   console.log(
                     `[ElevenLabs] Client tool call: ${message.client_tool_call?.tool_name}`
                   );
+                  console.log(
+                    `[ElevenLabs] Client tool call tool:`,
+                    JSON.stringify(message.client_tool_call, null, 2)
+                  );
+                  console.log(
+                    `[ElevenLabs] Client tool call parameters:`,
+                    JSON.stringify(
+                      message.client_tool_call?.parameters,
+                      null,
+                      2
+                    )
+                  );
+                  if (message.client_tool_call?.parameters?.filters) {
+                    console.log(
+                      `[ElevenLabs] Client tool call filters:`,
+                      JSON.stringify(
+                        message.client_tool_call?.parameters?.filters,
+                        null,
+                        2
+                      )
+                    );
+                  }
                   break;
 
                 default:
