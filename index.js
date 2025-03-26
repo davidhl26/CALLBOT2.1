@@ -450,8 +450,8 @@ fastify.register(async (fastifyInstance) => {
               conversation_config_override: {
                 agent: {
                   prompt: {
-                    // prompt: customParameters?.system_message || SYSTEM_MESSAGE,
-                    prompt: SYSTEM_MESSAGE,
+                    prompt: customParameters?.system_message,
+                    // prompt: SYSTEM_MESSAGE,
                   },
                   first_message:
                     customParameters?.first_message ||
