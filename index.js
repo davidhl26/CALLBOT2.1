@@ -23,6 +23,7 @@ import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 import { processCampaignBatch } from "./services/campaign.js";
 import { cleanupCall } from "./utils/callCleanup.js";
 import { getSignedUrl } from "./utils/elevenLabs.js";
+import userRoutes from "./routes/user.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -67,6 +68,7 @@ fastify.register(callRoutes);
 fastify.register(contactRoutes);
 fastify.register(campaignRoutes, { prefix: "/api/campaigns" });
 fastify.register(elevenLabsRoutes);
+fastify.register(userRoutes);
 
 // Constants
 let SYSTEM_MESSAGE = `
