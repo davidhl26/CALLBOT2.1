@@ -31,6 +31,18 @@ const Campaign = sequelize.define(
       type: DataTypes.TEXT,
       allowNull: true,
     },
+    voice: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    voice_id: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    language: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
     last_status: {
       type: DataTypes.STRING,
       allowNull: true,

@@ -11,6 +11,9 @@ async function makeCallWithRetry(
   systemMessage,
   firstMessage,
   aiProvider,
+  voice,
+  voiceId,
+  language,
   campaignId,
   contactId,
   retries = 0
@@ -48,6 +51,9 @@ async function makeCallWithRetry(
       system_message: systemMessage,
       first_message: firstMessage,
       ai_provider: aiProvider,
+      voice: voice,
+      voice_id: voiceId,
+      language: language,
       campaign_id: campaignId,
       contact_id: contactId,
     });
@@ -150,6 +156,9 @@ async function processCampaignBatch(campaign) {
           campaign.system_message,
           campaign.first_message,
           campaign.ai_provider,
+          campaign.voice,
+          campaign.voice_id,
+          campaign.language,
           campaign.id,
           contact.id
         );
