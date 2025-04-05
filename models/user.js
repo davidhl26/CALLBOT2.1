@@ -34,6 +34,14 @@ const User = sequelize.define(
       type: DataTypes.ENUM("Active", "Inactive"),
       defaultValue: "Inactive",
     },
+    google_oAuthAccessToken: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    google_oAuthRefreshToken: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
   },
   {
     timestamps: true,

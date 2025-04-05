@@ -29,7 +29,12 @@ export default async function campaignRoutes(fastify, options) {
         system_message,
         first_message,
         ai_provider,
+        user_id,
       } = request.body;
+
+      if (!user_id) {
+        return reply.code(400).send({ error: "User ID is required" });
+      }
 
       // Format phone numbers by adding "+" if not present
       const formattedNumbers = numbers.map((number) =>
@@ -47,6 +52,7 @@ export default async function campaignRoutes(fastify, options) {
         ai_provider,
         status: "pending",
         total_calls: formattedNumbers.length,
+        user_id, // Add user_id
       });
 
       return campaign;
@@ -65,8 +71,14 @@ export default async function campaignRoutes(fastify, options) {
       const page = parseInt(request.query.page) || 1;
       const limit = parseInt(request.query.limit) || 10;
       const offset = (page - 1) * limit;
+      const user_id = request.query.user_id;
+
+      if (!user_id) {
+        return reply.code(400).send({ error: "User ID is required" });
+      }
 
       const { count, rows } = await Campaign.findAndCountAll({
+        where: { user_id },
         order: [["createdAt", "DESC"]],
         limit,
         offset,
@@ -83,6 +95,7 @@ export default async function campaignRoutes(fastify, options) {
         numbers_to_call: campaign.numbers_to_call,
         telnyx_numbers: campaign.telnyx_numbers,
         system_message: campaign.system_message,
+        user_id: campaign.user_id,
         createdAt: campaign.createdAt,
         updatedAt: campaign.updatedAt,
       }));
@@ -135,9 +148,23 @@ export default async function campaignRoutes(fastify, options) {
   // Get single campaign
   fastify.get("/:id", async (request, reply) => {
     try {
-      const campaign = await Campaign.findByPk(request.params.id);
+      const user_id = request.query.user_id;
+
+      if (!user_id) {
+        return reply.code(400).send({ error: "User ID is required" });
+      }
+
+      const campaign = await Campaign.findOne({
+        where: {
+          id: request.params.id,
+          user_id: user_id,
+        },
+      });
+
       if (!campaign) {
-        return reply.code(404).send({ error: "Campaign not found" });
+        return reply
+          .code(404)
+          .send({ error: "Campaign not found or unauthorized access" });
       }
 
       // Format campaign to match desired structure
@@ -151,6 +178,7 @@ export default async function campaignRoutes(fastify, options) {
         numbers_to_call: campaign.numbers_to_call,
         telnyx_numbers: campaign.telnyx_numbers,
         system_message: campaign.system_message,
+        user_id: campaign.user_id,
         createdAt: campaign.createdAt,
         updatedAt: campaign.updatedAt,
       };
@@ -537,6 +565,26 @@ export default async function campaignRoutes(fastify, options) {
   // Get call logs for a campaign
   fastify.get("/:id/calls", async (request, reply) => {
     try {
+      const user_id = request.query.user_id;
+
+      if (!user_id) {
+        return reply.code(400).send({ error: "User ID is required" });
+      }
+
+      // First check if campaign belongs to user
+      const campaign = await Campaign.findOne({
+        where: {
+          id: request.params.id,
+          user_id,
+        },
+      });
+
+      if (!campaign) {
+        return reply
+          .code(404)
+          .send({ error: "Campaign not found or unauthorized access" });
+      }
+
       const page = parseInt(request.query.page) || 1;
       const limit = parseInt(request.query.limit) || 10;
       const offset = (page - 1) * limit;
@@ -603,6 +651,7 @@ export default async function campaignRoutes(fastify, options) {
       let systemMessage;
       let firstMessage;
       let aiProvider;
+      let user_id;
 
       // Process all parts of the multipart form
       for await (const part of request.parts()) {
@@ -626,6 +675,9 @@ export default async function campaignRoutes(fastify, options) {
             case "ai_provider":
               aiProvider = part.value;
               break;
+            case "user_id":
+              user_id = part.value;
+              break;
           }
         }
       }
@@ -637,11 +689,12 @@ export default async function campaignRoutes(fastify, options) {
         !telnyxNumbers ||
         !systemMessage ||
         !firstMessage ||
-        !aiProvider
+        !aiProvider ||
+        !user_id
       ) {
         return reply.code(400).send({
           error:
-            "Missing required fields: file, name, telnyx_numbers, system_message, first_message, ai_provider",
+            "Missing required fields: file, name, telnyx_numbers, system_message, first_message, ai_provider, user_id",
         });
       }
 
@@ -687,6 +740,7 @@ export default async function campaignRoutes(fastify, options) {
         ai_provider: aiProvider,
         status: "pending",
         total_calls: phoneNumbers.length,
+        user_id, // Add user_id to campaign
       });
 
       // Create or update contacts
@@ -700,6 +754,7 @@ export default async function campaignRoutes(fastify, options) {
           company: contact.company || null,
           notes: contact.notes || null,
           status: "Active",
+          user_id, // Add user_id to all contacts
         })),
         {
           updateOnDuplicate: [
@@ -709,6 +764,7 @@ export default async function campaignRoutes(fastify, options) {
             "email",
             "company",
             "notes",
+            "user_id", // Include user_id in updateOnDuplicate
           ],
           where: { phoneNumber: contacts.map((c) => c.phoneNumber) },
         }
