@@ -181,6 +181,10 @@ export default async function campaignRoutes(fastify, options) {
         user_id: campaign.user_id,
         createdAt: campaign.createdAt,
         updatedAt: campaign.updatedAt,
+        voice: campaign.voice,
+        voice_id: campaign.voice_id,
+        language: campaign.language,
+        ai_provider: campaign.ai_provider,
       };
     } catch (error) {
       console.error("Error fetching campaign:", error);
@@ -651,7 +655,11 @@ export default async function campaignRoutes(fastify, options) {
       let systemMessage;
       let firstMessage;
       let aiProvider;
+      let voice;
+      let voiceId;
+      let language;
       let user_id;
+
 
       // Process all parts of the multipart form
       for await (const part of request.parts()) {
@@ -674,6 +682,14 @@ export default async function campaignRoutes(fastify, options) {
               break;
             case "ai_provider":
               aiProvider = part.value;
+            case "voice":
+              voice = part.value;
+              break;
+            case "voice_id":
+              voiceId = part.value;
+              break;
+            case "language":
+              language = part.value;
               break;
             case "user_id":
               user_id = part.value;
@@ -729,6 +745,21 @@ export default async function campaignRoutes(fastify, options) {
       // Extract phone numbers for campaign
       const phoneNumbers = contacts.map((contact) => contact.phoneNumber);
 
+      console.log("baaaaaaaaaaaaaaaaaaaal",{
+        name,
+        all_numbers: phoneNumbers,
+        numbers_to_call: phoneNumbers,
+        telnyx_numbers: telnyxNumbers,
+        system_message: systemMessage,
+        first_message: firstMessage,
+        ai_provider: aiProvider,
+        voice: voice,
+        voice_id: voiceId,
+        language: language,
+        status: "pending",
+        total_calls: phoneNumbers.length,
+      });
+
       // Create campaign with the parsed form data
       const campaign = await db.Campaign.create({
         name,
@@ -738,6 +769,9 @@ export default async function campaignRoutes(fastify, options) {
         system_message: systemMessage,
         first_message: firstMessage,
         ai_provider: aiProvider,
+        voice: voice,
+        voice_id: voiceId,
+        language: language,
         status: "pending",
         total_calls: phoneNumbers.length,
         user_id, // Add user_id to campaign
