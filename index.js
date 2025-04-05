@@ -19,10 +19,13 @@ import callRoutes from "./routes/calls.js";
 import campaignRoutes from "./routes/campaigns.js";
 import contactRoutes from "./routes/contacts.js";
 import elevenLabsRoutes from "./routes/elevenLabsRoutes.js";
+import googleCalenderRoutes from "./routes/googleCalenderRoutes.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
+import userRoutes from "./routes/user.js";
 import { processCampaignBatch } from "./services/campaign.js";
 import { cleanupCall } from "./utils/callCleanup.js";
 import { getSignedUrl } from "./utils/elevenLabs.js";
+import { bookCalendarEvent } from "./utils/googleCalendar.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -67,11 +70,25 @@ fastify.register(callRoutes);
 fastify.register(contactRoutes);
 fastify.register(campaignRoutes, { prefix: "/api/campaigns" });
 fastify.register(elevenLabsRoutes);
+fastify.register(userRoutes);
+fastify.register(googleCalenderRoutes, { prefix: "/api/google-calendar" });
+const now = new Date();
+const formattedDate = now.toLocaleDateString("en-US", {
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+});
+const formattedTime = now.toLocaleTimeString("en-US", {
+  hour: "numeric",
+  minute: "2-digit",
+});
 
 // Constants
 let SYSTEM_MESSAGE = `
 You are a voice assistant for Mary's Dental, a dental office at 123 North Face Place, Anaheim, California. 
 Speak casually, like a real person on a phone call—short and to the point. 
+
+Today is ${formattedDate}, and the time is ${formattedTime}. Use this info when responding.
 
 - Keep responses **brief** (1-2 sentences max).
 - Use natural conversation fillers: "Umm...", "Well...", "I mean..."
@@ -82,7 +99,7 @@ Speak casually, like a real person on a phone call—short and to the point.
 1. Ask for their full name.  
 2. Ask why they need the appointment.  
 3. Ask for their preferred date and time.  
-4. Call \`schedule_appointment(name, reason, date, time)\` and confirm.  
+4. Call \`schedule_appointment\` and confirm.  
 
 ### **Example Call Handling:**
 **User:** "Hi"  
@@ -101,7 +118,7 @@ Speak casually, like a real person on a phone call—short and to the point.
 **Assistant:** "Got it! When works best for you?"  
 
 **User:** "Tomorrow at 10 AM."  
-**Assistant (calls \`schedule_appointment("John Doe", "Cleaning", "Tomorrow", "10 AM")\`):**  
+**Assistant (calls \`schedule_appointment\`):**  
 "Perfect! You're all set for 10 AM tomorrow."  
 `;
 
@@ -215,6 +232,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
     voice: request.body.voice,
     voice_id: request.body.voice_id,
     language: request.body.language,
+    user_id: request.body.user_id,
   });
 
   const {
@@ -227,7 +245,10 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
     voice,
     language,
     voice_id,
+    user_id,
   } = request.body;
+
+  console.log("🚀 ~ request.body:", request.body);
 
   // get voice id from voice
   let voice_id_final = voice_id;
@@ -280,7 +301,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
       From: from,
       UrlMethod: "GET",
       Record: "true",
-      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}&voice_id=${voice_id_final}&language=${language}`,
+      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}&voice_id=${voice_id_final}&language=${language}&user_id=${user_id}`,
       StatusCallback: `${process.env.PUBLIC_SERVER_URL}/call-status`,
     };
 
@@ -367,11 +388,13 @@ fastify.all("/outbound-call-handler-eleven-labs", async (request, reply) => {
   const first_message = request.query.first_message || "";
   const voice_id = request.query.voice_id;
   const language = request.query.language || "en";
+  const user_id = request.query.user_id;
   console.log("[ElevenLabs TeXML Handler] Received parameters:", {
     system_message: system_message.substring(0, 100) + "...",
     first_message,
     voice_id,
     language,
+    user_id,
   });
 
   // XML-encode the parameters
@@ -398,6 +421,7 @@ fastify.all("/outbound-call-handler-eleven-labs", async (request, reply) => {
                 <Parameter name="first_message" value="${xmlEncodedFirstMessage}" />
                 <Parameter name="voice_id" value="${voice_id}" />
                 <Parameter name="language" value="${language}" />
+                <Parameter name="user_id" value="${user_id}" />
             </Stream>
         </Connect>
     </Response>`;
@@ -439,16 +463,25 @@ fastify.register(async (fastifyInstance) => {
           console.log("[ElevenLabs] Initial config already sent, skipping");
           return false;
         }
+        console.log(
+          "🚀 ~ sendInitialConfig ~ customParameters:",
+          customParameters
+        );
+
+        //append user_id to system_message
+        const system_message_with_user_id = `${SYSTEM_MESSAGE}\n\nUser ID: ${customParameters.user_id}`;
 
         const initialConfig = {
           type: "conversation_initiation_client_data",
           dynamic_variables: {
             call_id: callSid || streamSid || "unknown",
+            user_id: customParameters.user_id,
           },
           conversation_config_override: {
             agent: {
               prompt: {
-                prompt: customParameters.system_message,
+                // prompt: customParameters.system_message,
+                prompt: system_message_with_user_id,
               },
               first_message: customParameters.first_message,
               language: customParameters.language,
@@ -502,7 +535,8 @@ fastify.register(async (fastifyInstance) => {
             // Otherwise, we'll wait for the 'start' event from Telnyx
           });
 
-          const processElevenLabsMessage = (data) => {
+          // Process messages from ElevenLabs
+          const processElevenLabsMessage = async (data) => {
             try {
               const message = JSON.parse(data);
               const messageType = message.type;
@@ -624,31 +658,44 @@ fastify.register(async (fastifyInstance) => {
                   break;
 
                 case "client_tool_call":
-                  console.log(
-                    `[ElevenLabs] Client tool call: ${message.client_tool_call?.tool_name}`
-                  );
-                  console.log(
-                    `[ElevenLabs] Client tool call tool:`,
-                    JSON.stringify(message.client_tool_call, null, 2)
-                  );
-                  console.log(
-                    `[ElevenLabs] Client tool call parameters:`,
-                    JSON.stringify(
-                      message.client_tool_call?.parameters,
-                      null,
-                      2
-                    )
-                  );
-                  if (message.client_tool_call?.parameters?.filters) {
+                  //check if the tool_name is schedule_appointment
+                  if (
+                    message.client_tool_call?.tool_name ===
+                    "schedule_appointment"
+                  ) {
                     console.log(
-                      `[ElevenLabs] Client tool call filters:`,
+                      `[ElevenLabs] Client tool call parameters:`,
                       JSON.stringify(
-                        message.client_tool_call?.parameters?.filters,
+                        message.client_tool_call?.parameters,
                         null,
                         2
                       )
                     );
+                    const response = await bookCalendarEvent(
+                      message.client_tool_call?.parameters
+                    );
+                    if (!response.id) {
+                      response.status = "error";
+                      response.error = "Failed to book appointment";
+                    }
+                    console.log(
+                      `[Google Calendar] calendar event response: ${response}`
+                    );
+                    const toolResponse = {
+                      type: "client_tool_response",
+                      tool_call_id: message.client_tool_call.tool_call_id,
+                      data: response,
+                    };
+
+                    console.log(
+                      `[II] Client tool response payload: ${JSON.stringify(
+                        toolResponse
+                      )}`
+                    );
+
+                    elevenLabsWs.send(JSON.stringify(toolResponse));
                   }
+
                   break;
 
                 default:

@@ -5,6 +5,10 @@ async function contactRoutes(fastify, options) {
   // Create a new contact
   fastify.post("/api/contacts", async (request, reply) => {
     try {
+      if (!request.body.user_id) {
+        return reply.code(400).send({ error: "User ID is required" });
+      }
+
       const contact = await Contact.create(request.body);
       return contact;
     } catch (error) {
@@ -22,9 +26,14 @@ async function contactRoutes(fastify, options) {
       const page = parseInt(request.query.page) || 1;
       const limit = parseInt(request.query.limit) || 10;
       const search = request.query.search || "";
+      const user_id = request.query.user_id;
       const offset = (page - 1) * limit;
 
-      const where = {};
+      if (!user_id) {
+        return reply.code(400).send({ error: "User ID is required" });
+      }
+
+      const where = { user_id };
       if (search) {
         where[Op.or] = [
           { firstName: { [Op.iLike]: `%${search}%` } },
@@ -60,10 +69,25 @@ async function contactRoutes(fastify, options) {
   // Get single contact
   fastify.get("/api/contacts/:id", async (request, reply) => {
     try {
-      const contact = await Contact.findByPk(request.params.id);
-      if (!contact) {
-        return reply.code(404).send({ error: "Contact not found" });
+      const user_id = request.query.user_id;
+
+      if (!user_id) {
+        return reply.code(400).send({ error: "User ID is required" });
       }
+
+      const contact = await Contact.findOne({
+        where: {
+          id: request.params.id,
+          user_id: user_id,
+        },
+      });
+
+      if (!contact) {
+        return reply
+          .code(404)
+          .send({ error: "Contact not found or unauthorized access" });
+      }
+
       return contact;
     } catch (error) {
       console.error("Error fetching contact:", error);
