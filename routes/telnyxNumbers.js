@@ -4,17 +4,21 @@ import TelnyxNumber from "../models/TelnyxNumber.js";
 export default async function telnyxNumberRoutes(fastify) {
   // Get all numbers with optional pagination
   fastify.get("/api/telnyx-numbers", async (request, reply) => {
-    const { page, limit, search, active } = request.query;
-    
+    const { page, limit, search, active, user_id } = request.query;
+
+    if (!user_id) {
+      return reply.code(400).send({ error: "User ID is required" });
+    }
+
     // Build where clause
-    const where = {};
+    const where = { user_id };
     if (search) {
       where.phoneNumber = {
         [Op.iLike]: `%${search}%`,
       };
     }
     if (active !== undefined) {
-      where.status = active === 'true' ? 'Active' : 'Inactive';
+      where.status = active === "true" ? "Active" : "Inactive";
     }
 
     // If page and limit are provided, use pagination
@@ -43,15 +47,29 @@ export default async function telnyxNumberRoutes(fastify) {
 
     return {
       numbers,
-      total: numbers.length
+      total: numbers.length,
     };
   });
 
   // Get single number
   fastify.get("/api/telnyx-numbers/:id", async (request, reply) => {
-    const number = await TelnyxNumber.findByPk(request.params.id);
+    const user_id = request.query.user_id;
+
+    if (!user_id) {
+      return reply.code(400).send({ error: "User ID is required" });
+    }
+
+    const number = await TelnyxNumber.findOne({
+      where: {
+        id: request.params.id,
+        user_id,
+      },
+    });
+
     if (!number) {
-      reply.code(404).send({ error: "Number not found" });
+      reply
+        .code(404)
+        .send({ error: "Number not found or unauthorized access" });
       return;
     }
     return number;
@@ -60,6 +78,10 @@ export default async function telnyxNumberRoutes(fastify) {
   // Create new number
   fastify.post("/api/telnyx-numbers", async (request, reply) => {
     try {
+      if (!request.body.user_id) {
+        return reply.code(400).send({ error: "User ID is required" });
+      }
+
       const number = await TelnyxNumber.create(request.body);
       reply.code(201).send(number);
     } catch (error) {

@@ -134,12 +134,16 @@ async function processCampaignBatch(campaign) {
 
         // Find or create contact for this number
         const [contact] = await Contact.findOrCreate({
-          where: { phoneNumber: toNumber },
+          where: {
+            phoneNumber: toNumber,
+            user_id: campaign.user_id,
+          },
           defaults: {
             firstName: "Unknown",
             lastName: "Contact",
             gender: "mr",
             status: "Active",
+            user_id: campaign.user_id, // Include user_id in defaults
           },
         });
 
