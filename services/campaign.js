@@ -16,6 +16,7 @@ async function makeCallWithRetry(
   language,
   campaignId,
   contactId,
+  user_id,
   retries = 0
 ) {
   try {
@@ -56,6 +57,7 @@ async function makeCallWithRetry(
       language: language,
       campaign_id: campaignId,
       contact_id: contactId,
+      user_id: user_id,
     });
     return { success: true, data: response.data };
   } catch (error) {
@@ -88,8 +90,12 @@ async function makeCallWithRetry(
         systemMessage,
         firstMessage,
         aiProvider,
+        voice,
+        voiceId,
+        language,
         campaignId,
         contactId,
+        user_id,
         retries + 1
       );
     }
@@ -164,7 +170,8 @@ async function processCampaignBatch(campaign) {
           campaign.voice_id,
           campaign.language,
           campaign.id,
-          contact.id
+          contact.id,
+          campaign.user_id
         );
       })
     );
