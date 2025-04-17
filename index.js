@@ -469,7 +469,7 @@ fastify.register(async (fastifyInstance) => {
         );
 
         //append user_id to system_message
-        const system_message_with_user_id = `${SYSTEM_MESSAGE}\n\nUser ID: ${customParameters.user_id}`;
+        const system_message_with_user_id = `${customParameters.system_message}\n\nUser ID: ${customParameters.user_id}`;
 
         const initialConfig = {
           type: "conversation_initiation_client_data",
