@@ -11,11 +11,18 @@ import { hangupCall } from "./telnyx.js";
 export const cleanupCall = async (callControlId, telnyxWs, elevenLabsWs) => {
   console.log("[Cleanup] Starting call cleanup process");
 
-  // First try to hangup the call
+  // First try to hangup the call with a timeout to prevent hanging
   let hangupResponse = null;
   if (callControlId) {
     try {
-      hangupResponse = await hangupCall(callControlId);
+      // Use Promise.race to timeout after 5 seconds
+      hangupResponse = await Promise.race([
+        hangupCall(callControlId),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Hangup call timed out")), 5000)
+        ),
+      ]);
+
       if (hangupResponse?.data) {
         console.log("[Cleanup] Hangup response:", hangupResponse.data);
       }

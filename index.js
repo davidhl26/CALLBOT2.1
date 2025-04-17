@@ -444,6 +444,77 @@ fastify.register(async (fastifyInstance) => {
       let customParameters = null; // Add this to store parameters
       let callControlId = null;
       let initialConfigSent = false; // Track if config has been sent
+      let inactivityTimeout = null; // Add timeout to detect inactivity
+      let lastActivity = Date.now(); // Track last activity
+      let isClosing = false; // Track if we're in the process of closing
+
+      // Function to forcibly close connections after inactivity
+      const setupInactivityTimeout = () => {
+        // Clear any existing timeout
+        if (inactivityTimeout) {
+          clearTimeout(inactivityTimeout);
+        }
+
+        // Set a new timeout - close connections after 2 minutes of inactivity
+        inactivityTimeout = setTimeout(() => {
+          console.log(
+            "[ElevenLabs] Inactivity timeout reached, closing connections"
+          );
+          forceCleanup();
+        }, 120000); // 2 minutes
+      };
+
+      // Update last activity timestamp and reset timeout
+      const updateActivity = () => {
+        lastActivity = Date.now();
+        setupInactivityTimeout();
+      };
+
+      // Force cleanup of all connections
+      const forceCleanup = async () => {
+        if (isClosing) return; // Prevent multiple cleanup attempts
+        isClosing = true;
+
+        console.log("[Cleanup] Force closing connections due to inactivity");
+
+        // Attempt to hang up the call if we have a call control ID
+        if (callControlId) {
+          try {
+            await cleanupCall(callControlId, ws, elevenLabsWs);
+          } catch (error) {
+            console.error("[Cleanup] Error in forced cleanup:", error);
+          }
+        }
+
+        // Ensure ElevenLabs connection is closed
+        if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+          try {
+            console.log("[Cleanup] Force closing ElevenLabs connection");
+            elevenLabsWs.close();
+          } catch (error) {
+            console.error(
+              "[Cleanup] Error closing ElevenLabs connection:",
+              error
+            );
+          }
+        }
+
+        // Ensure Telnyx connection is closed
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try {
+            console.log("[Cleanup] Force closing Telnyx connection");
+            ws.close();
+          } catch (error) {
+            console.error("[Cleanup] Error closing Telnyx connection:", error);
+          }
+        }
+
+        // Clear the timeout
+        if (inactivityTimeout) {
+          clearTimeout(inactivityTimeout);
+          inactivityTimeout = null;
+        }
+      };
 
       // Function to send initial config only when we have parameters
       const sendInitialConfig = () => {
@@ -525,8 +596,12 @@ fastify.register(async (fastifyInstance) => {
           );
           elevenLabsWs = new WebSocket(signedUrl);
 
+          // Start inactivity timeout
+          setupInactivityTimeout();
+
           elevenLabsWs.on("open", () => {
             console.log("[ElevenLabs] Connected to Conversational AI");
+            updateActivity();
 
             // Only send the config if we already have customParameters
             if (customParameters) {
@@ -538,6 +613,7 @@ fastify.register(async (fastifyInstance) => {
           // Process messages from ElevenLabs
           const processElevenLabsMessage = async (data) => {
             try {
+              updateActivity(); // Update activity timestamp
               const message = JSON.parse(data);
               const messageType = message.type;
 
@@ -720,6 +796,15 @@ fastify.register(async (fastifyInstance) => {
 
           elevenLabsWs.on("close", async () => {
             console.log("[ElevenLabs] Disconnected");
+            // Cancel any inactivity timeout
+            if (inactivityTimeout) {
+              clearTimeout(inactivityTimeout);
+              inactivityTimeout = null;
+            }
+
+            // Mark that we're closing to prevent duplicate cleanup
+            isClosing = true;
+
             // cleanupCall function to handle hangup and websocket closing
             if (callControlId) {
               await cleanupCall(callControlId, ws, elevenLabsWs);
@@ -742,6 +827,9 @@ fastify.register(async (fastifyInstance) => {
       // Handle messages from Telnyx
       ws.on("message", async (message) => {
         try {
+          // Update activity
+          updateActivity();
+
           const msg = JSON.parse(message);
 
           if (msg.event !== "media") {
@@ -789,6 +877,15 @@ fastify.register(async (fastifyInstance) => {
 
             case "stop":
               console.log(`[Telnyx] Stream ${streamSid} ended`);
+              // Cancel any inactivity timeout
+              if (inactivityTimeout) {
+                clearTimeout(inactivityTimeout);
+                inactivityTimeout = null;
+              }
+
+              // Mark that we're closing to prevent duplicate cleanup
+              isClosing = true;
+
               if (elevenLabsWs?.readyState === WebSocket.OPEN) {
                 elevenLabsWs.close();
               }
@@ -803,13 +900,24 @@ fastify.register(async (fastifyInstance) => {
       });
 
       ws.on("close", async () => {
-        // Use the new cleanupCall function
-        if (callControlId) {
-          await cleanupCall(callControlId, ws, elevenLabsWs);
-        } else {
-          // Just close the elevenLabs websocket if no callControlId
-          if (elevenLabsWs?.readyState === WebSocket.OPEN) {
-            elevenLabsWs.close();
+        // Cancel any inactivity timeout
+        if (inactivityTimeout) {
+          clearTimeout(inactivityTimeout);
+          inactivityTimeout = null;
+        }
+
+        // Mark that we're closing to prevent duplicate cleanup
+        if (!isClosing) {
+          isClosing = true;
+
+          // Use the cleanupCall function if we have a callControlId
+          if (callControlId) {
+            await cleanupCall(callControlId, ws, elevenLabsWs);
+          } else {
+            // Just close the elevenLabs websocket if no callControlId
+            if (elevenLabsWs?.readyState === WebSocket.OPEN) {
+              elevenLabsWs.close();
+            }
           }
         }
 
