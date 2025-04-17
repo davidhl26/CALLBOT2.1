@@ -1301,13 +1301,17 @@ fastify.post("/call-status", async (request, reply) => {
               ["failed", "no-answer", "busy"].includes(c.status)
           );
 
+          // Always remove the number from in_progress_numbers
+          const updatedInProgressNumbers = (
+            campaign.in_progress_numbers || []
+          ).filter((num) => num !== call.to_number);
+
           // Only remove from numbers_to_call if all attempts are finished
+          let updatedNumbersToCall = campaign.numbers_to_call;
           if (allAttemptsFinished) {
-            const remainingNumbers = campaign.numbers_to_call.filter(
+            updatedNumbersToCall = campaign.numbers_to_call.filter(
               (num) => num !== call.to_number
             );
-            await campaign.update({ numbers_to_call: remainingNumbers });
-            console.log(`Removed ${call.to_number} from numbers_to_call`);
 
             // Update completed/failed counts
             if (numberCalls.some((c) => c.status === "completed")) {
@@ -1315,9 +1319,28 @@ fastify.post("/call-status", async (request, reply) => {
             } else {
               await campaign.increment("failed_calls");
             }
+          }
+
+          // Update campaign with new number lists
+          await campaign.update({
+            in_progress_numbers: updatedInProgressNumbers,
+            numbers_to_call: updatedNumbersToCall,
+          });
+
+          console.log(
+            `Removed ${call.to_number} from in_progress_numbers. In-progress count: ${updatedInProgressNumbers.length}`
+          );
+
+          if (allAttemptsFinished) {
+            console.log(
+              `Removed ${call.to_number} from numbers_to_call. Remaining: ${updatedNumbersToCall.length}`
+            );
 
             // Check if campaign is completed
-            if (remainingNumbers.length === 0) {
+            if (
+              updatedNumbersToCall.length === 0 &&
+              updatedInProgressNumbers.length === 0
+            ) {
               console.log(
                 `Campaign ${campaign.id} completed - all numbers processed`
               );
@@ -1327,6 +1350,12 @@ fastify.post("/call-status", async (request, reply) => {
               console.log(`Starting next batch for campaign ${campaign.id}`);
               await processCampaignBatch(campaign);
             }
+          } else {
+            // Still start next batch to process any available numbers
+            console.log(
+              `Starting next batch for campaign ${campaign.id} (some attempts not finished)`
+            );
+            await processCampaignBatch(campaign);
           }
         }
       }

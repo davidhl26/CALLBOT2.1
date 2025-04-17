@@ -207,10 +207,23 @@ export default async function campaignRoutes(fastify, options) {
         return reply.code(400).send({ error: "Campaign is not in progress" });
       }
 
-      // Store the current status before pausing
+      // Move in-progress numbers back to numbers_to_call to ensure they're called when restarted
+      const inProgressNumbers = campaign.in_progress_numbers || [];
+      let updatedNumbersToCall = campaign.numbers_to_call || [];
+
+      // Add any in-progress numbers back to numbers_to_call if they're not already there
+      inProgressNumbers.forEach((number) => {
+        if (!updatedNumbersToCall.includes(number)) {
+          updatedNumbersToCall.push(number);
+        }
+      });
+
+      // Store the current status before pausing and update other fields
       await campaign.update({
         last_status: campaign.status,
         status: "paused",
+        numbers_to_call: updatedNumbersToCall,
+        in_progress_numbers: [], // Clear in-progress numbers when pausing
       });
 
       return { success: true, message: "Campaign paused successfully" };
@@ -260,28 +273,12 @@ export default async function campaignRoutes(fastify, options) {
         return reply.code(404).send({ error: "Campaign not found" });
       }
 
-      // Add unresponsive numbers back to numbers_to_call
-      const updatedNumbersToCall = [
-        ...campaign.numbers_to_call,
-        ...campaign.unresponsive_numbers,
-      ];
-
-      // Reset unresponsive tracking
-      await campaign.update({
-        numbers_to_call: updatedNumbersToCall,
-        unresponsive_numbers: [],
-        unresponsive_calls: 0,
-      });
-
-      // If campaign was completed, set it back to in_progress
-      if (campaign.status === "completed") {
-        await campaign.update({ status: "in_progress" });
-        processCampaignBatch(campaign);
-      }
+      // Use the recycleCampaign function which handles recycling of failed numbers
+      await recycleCampaign(campaign);
 
       return {
         success: true,
-        message: "Unresponsive numbers recycled successfully",
+        message: "Failed, no-answer, and busy numbers recycled successfully",
       };
     } catch (error) {
       console.error("Error recycling unresponsive numbers:", error);
@@ -363,7 +360,6 @@ export default async function campaignRoutes(fastify, options) {
       const totalCalls = campaign.completed_calls + campaign.failed_calls;
       const completedCalls = campaign.completed_calls;
       const failedCalls = campaign.failed_calls;
-      const unresponsiveCalls = campaign.unresponsive_calls;
       const progress =
         totalCalls > 0
           ? Math.round(((completedCalls + failedCalls) / totalCalls) * 100)
@@ -376,54 +372,6 @@ export default async function campaignRoutes(fastify, options) {
             )
           : 0;
 
-      // Calculate button states based on campaign status
-      const buttonStates = {
-        start: {
-          enabled: campaign.status === "pending",
-          tooltip:
-            campaign.status === "in_progress"
-              ? "Campaign is already running"
-              : campaign.status === "paused"
-              ? "Use Restart to continue the campaign"
-              : campaign.status === "completed"
-              ? "Campaign is completed. Create a new campaign to start again"
-              : "Start the campaign",
-        },
-        pause: {
-          enabled: campaign.status === "in_progress",
-          tooltip:
-            campaign.status === "paused"
-              ? "Campaign is already paused"
-              : campaign.status === "completed"
-              ? "Campaign is completed"
-              : campaign.status === "pending"
-              ? "Start the campaign first"
-              : "Pause the campaign",
-        },
-        restart: {
-          enabled: campaign.status === "paused",
-          tooltip:
-            campaign.status === "in_progress"
-              ? "Campaign is already running"
-              : campaign.status === "paused"
-              ? "Resume the campaign"
-              : campaign.status === "completed"
-              ? "Campaign is completed. Cannot restart"
-              : "Campaign must be paused to restart",
-        },
-        recycle: {
-          enabled:
-            campaign.unresponsive_calls > 0 &&
-            (campaign.status === "completed" || campaign.status === "paused"),
-          tooltip:
-            campaign.unresponsive_calls === 0
-              ? "No unresponsive calls to recycle"
-              : campaign.status === "in_progress"
-              ? "Pause campaign before recycling"
-              : "Recycle unresponsive numbers",
-        },
-      };
-
       async function getCampaignStats(campaignId) {
         try {
           const campaign = await Campaign.findByPk(campaignId);
@@ -434,43 +382,46 @@ export default async function campaignRoutes(fastify, options) {
           // Get all calls for this campaign
           const calls = await Call.findAll({
             where: { campaign_id: campaignId },
+            order: [["start_time", "DESC"]], // Get the most recent call first
+          });
+
+          // Group calls by phone number to find the latest status for each number
+          const callsByNumber = {};
+          calls.forEach((call) => {
+            // If we haven't seen this number yet, it's the most recent call (because of our order)
+            if (!callsByNumber[call.to_number]) {
+              callsByNumber[call.to_number] = call;
+            }
           });
 
           // Get unique numbers that have been called
-          const uniqueNumbers = [
-            ...new Set(calls.map((call) => call.to_number)),
-          ];
+          const uniqueNumbers = Object.keys(callsByNumber);
 
-          // For each unique number, get its latest call status
-          const numberStatuses = uniqueNumbers.map((number) => {
-            const numberCalls = calls.filter(
-              (call) => call.to_number === number
-            );
-            const latestCall = numberCalls.reduce((latest, current) => {
-              if (
-                !latest ||
-                new Date(current.start_time) > new Date(latest.start_time)
-              ) {
-                return current;
-              }
-              return latest;
-            }, null);
-            return latestCall.status;
+          // Calculate statuses based on the most recent call for each number
+          const completedNumbers = [];
+          const failedNumbers = [];
+
+          uniqueNumbers.forEach((number) => {
+            const latestCall = callsByNumber[number];
+            if (latestCall.status === "completed") {
+              completedNumbers.push(number);
+            } else if (
+              ["failed", "no-answer", "busy"].includes(latestCall.status)
+            ) {
+              failedNumbers.push(number);
+            }
           });
 
           const stats = {
             // Total is based on initial numbers in campaign
             total_numbers: campaign.all_numbers.length,
-            // Completed is based on unique numbers with completed status
-            completed_numbers: numberStatuses.filter(
-              (status) => status === "completed"
-            ).length,
-            // Failed/unresponsive numbers
-            failed_numbers: numberStatuses.filter((status) =>
-              ["failed", "no-answer", "busy"].includes(status)
-            ).length,
+            // Completed and failed counts based on most recent status
+            completed_numbers: completedNumbers.length,
+            failed_numbers: failedNumbers.length,
             // Numbers not yet called or in progress
             remaining_numbers: campaign.numbers_to_call.length,
+            // Recyclable numbers (failed, no-answer, busy)
+            recyclable_numbers: failedNumbers,
             // Progress percentage
             progress: (
               ((campaign.all_numbers.length - campaign.numbers_to_call.length) /
@@ -509,13 +460,59 @@ export default async function campaignRoutes(fastify, options) {
 
       const campaignStats = await getCampaignStats(campaign.id);
 
+      // Calculate button states based on campaign status and available recyclable numbers
+      const buttonStates = {
+        start: {
+          enabled: campaign.status === "pending",
+          tooltip:
+            campaign.status === "in_progress"
+              ? "Campaign is already running"
+              : campaign.status === "paused"
+              ? "Use Restart to continue the campaign"
+              : campaign.status === "completed"
+              ? "Campaign is completed. Create a new campaign to start again"
+              : "Start the campaign",
+        },
+        pause: {
+          enabled: campaign.status === "in_progress",
+          tooltip:
+            campaign.status === "paused"
+              ? "Campaign is already paused"
+              : campaign.status === "completed"
+              ? "Campaign is completed"
+              : campaign.status === "pending"
+              ? "Start the campaign first"
+              : "Pause the campaign",
+        },
+        restart: {
+          enabled: campaign.status === "paused",
+          tooltip:
+            campaign.status === "in_progress"
+              ? "Campaign is already running"
+              : campaign.status === "paused"
+              ? "Resume the campaign"
+              : campaign.status === "completed"
+              ? "Campaign is completed. Cannot restart"
+              : "Campaign must be paused to restart",
+        },
+        recycle: {
+          enabled:
+            campaignStats.recyclable_numbers?.length > 0 &&
+            (campaign.status === "completed" || campaign.status === "paused"),
+          tooltip: !campaignStats.recyclable_numbers?.length
+            ? "No failed calls to recycle"
+            : campaign.status === "in_progress"
+            ? "Pause campaign before recycling"
+            : `Recycle ${campaignStats.recyclable_numbers.length} failed, no-answer, and busy numbers`,
+        },
+      };
+
       return {
         success: true,
         data: {
           total_calls: totalCalls,
           completed_calls: completedCalls,
           failed_calls: failedCalls,
-          unresponsive_calls: unresponsiveCalls,
           progress,
           current_batch: {
             size: campaign.current_batch_size,
@@ -525,7 +522,7 @@ export default async function campaignRoutes(fastify, options) {
           },
           remaining_calls: campaign.numbers_to_call.length,
           status: campaign.status,
-          unresponsive_numbers: campaign.unresponsive_numbers,
+          recyclable_numbers: campaignStats.recyclable_numbers || [],
           button_states: buttonStates,
           call_logs: {
             data: callLogs.map((call) => ({
@@ -660,7 +657,6 @@ export default async function campaignRoutes(fastify, options) {
       let language;
       let user_id;
 
-
       // Process all parts of the multipart form
       for await (const part of request.parts()) {
         if (part.type === "file") {
@@ -745,7 +741,7 @@ export default async function campaignRoutes(fastify, options) {
       // Extract phone numbers for campaign
       const phoneNumbers = contacts.map((contact) => contact.phoneNumber);
 
-      console.log("baaaaaaaaaaaaaaaaaaaal",{
+      console.log("baaaaaaaaaaaaaaaaaaaal", {
         name,
         all_numbers: phoneNumbers,
         numbers_to_call: phoneNumbers,
