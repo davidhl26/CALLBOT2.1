@@ -27,6 +27,11 @@ export async function up(queryInterface, Sequelize) {
       defaultValue: [],
       allowNull: false,
     },
+    in_progress_numbers: {
+      type: Sequelize.JSON,
+      defaultValue: [],
+      allowNull: false,
+    },
     telnyx_numbers: {
       type: Sequelize.JSON,
       defaultValue: [],

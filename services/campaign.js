@@ -116,18 +116,29 @@ async function processCampaignBatch(campaign) {
   }
 
   try {
-    // Get remaining numbers to call
+    // Get remaining numbers to call, excluding those already in progress
     let remainingNumbers = campaign.numbers_to_call || [];
-    console.log(
-      `Processing batch of ${remainingNumbers.length} numbers for campaign ${campaign.id}`
+    const inProgressNumbers = campaign.in_progress_numbers || [];
+
+    // Filter out numbers that are currently in progress
+    const availableNumbers = remainingNumbers.filter(
+      (number) => !inProgressNumbers.includes(number)
     );
 
-    // Get batch size based on available Telnyx numbers
-    const batchSize = Math.min(
-      campaign.telnyx_numbers.length,
-      remainingNumbers.length
+    console.log(
+      `Processing batch of ${availableNumbers.length} available numbers for campaign ${campaign.id}`
     );
-    if (batchSize === 0) {
+
+    if (availableNumbers.length === 0) {
+      // If no available numbers, check if there are any in-progress numbers
+      if (inProgressNumbers.length > 0) {
+        console.log(
+          `Campaign ${campaign.id} - waiting for ${inProgressNumbers.length} in-progress calls to complete`
+        );
+        return; // Exit and wait for in-progress calls to complete
+      }
+
+      // If no in-progress numbers and no available numbers, campaign is completed
       console.log(
         `Campaign ${campaign.id} completed - no more numbers to call`
       );
@@ -135,8 +146,28 @@ async function processCampaignBatch(campaign) {
       return;
     }
 
+    // Get batch size based on available Telnyx numbers
+    const batchSize = Math.min(
+      campaign.telnyx_numbers.length,
+      availableNumbers.length
+    );
+    if (batchSize === 0) {
+      console.log(`Campaign ${campaign.id} - no Telnyx numbers available`);
+      return;
+    }
+
     // Get current batch
-    const currentBatch = remainingNumbers.slice(0, batchSize);
+    const currentBatch = availableNumbers.slice(0, batchSize);
+
+    // Add current batch to in-progress numbers
+    const updatedInProgressNumbers = [...inProgressNumbers, ...currentBatch];
+    await campaign.update({ in_progress_numbers: updatedInProgressNumbers });
+
+    console.log(
+      `Added ${currentBatch.length} numbers to in-progress: ${JSON.stringify(
+        currentBatch
+      )}`
+    );
 
     // Process each number in the batch
     const calls = await Promise.all(
@@ -193,6 +224,7 @@ async function restartCampaign(campaign) {
       completed_calls: 0,
       failed_calls: 0,
       numbers_to_call: campaign.all_numbers, // Use all numbers
+      in_progress_numbers: [], // Reset in-progress numbers
       status: "in_progress",
     });
 
@@ -208,15 +240,31 @@ async function restartCampaign(campaign) {
 async function recycleCampaign(campaign) {
   try {
     // Get all calls for this campaign
-    const calls = await Call.findAll({
+    const allCalls = await Call.findAll({
       where: {
         campaign_id: campaign.id,
-        status: ["failed", "no-answer", "busy"],
       },
+      order: [["start_time", "DESC"]], // Get most recent calls first
     });
 
-    // Get numbers to recycle
-    const numbersToRecycle = calls.map((call) => call.to_number);
+    // Group calls by phone number to find the latest status for each number
+    const callsByNumber = {};
+    allCalls.forEach((call) => {
+      const phoneNumber = call.to_number;
+      // Only track this call if we haven't seen this number before (since we ordered by most recent)
+      if (!callsByNumber[phoneNumber]) {
+        callsByNumber[phoneNumber] = call;
+      }
+    });
+
+    // Get numbers to recycle - those whose most recent call status is failed/no-answer/busy
+    const numbersToRecycle = Object.values(callsByNumber)
+      .filter((call) => ["failed", "no-answer", "busy"].includes(call.status))
+      .map((call) => call.to_number);
+
+    console.log(
+      `Found ${numbersToRecycle.length} numbers to recycle for campaign ${campaign.id}`
+    );
 
     if (numbersToRecycle.length === 0) {
       console.log(`No numbers to recycle for campaign ${campaign.id}`);
@@ -225,9 +273,8 @@ async function recycleCampaign(campaign) {
 
     // Update campaign for recycling
     await campaign.update({
-      completed_calls: 0,
-      failed_calls: 0,
       numbers_to_call: numbersToRecycle,
+      in_progress_numbers: [], // Reset in-progress numbers
       status: "in_progress",
     });
 

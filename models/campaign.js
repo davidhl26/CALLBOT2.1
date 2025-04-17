@@ -69,6 +69,12 @@ const Campaign = sequelize.define(
       allowNull: false,
       comment: "Numbers that still need to be called or retried",
     },
+    in_progress_numbers: {
+      type: DataTypes.JSON,
+      defaultValue: [],
+      allowNull: false,
+      comment: "Numbers that are currently being called",
+    },
     telnyx_numbers: {
       type: DataTypes.JSON,
       defaultValue: [],
