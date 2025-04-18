@@ -1,4 +1,5 @@
 import Call from "../models/call.js";
+import { getCallRecordingURL } from "../utils/getCallRecordingURL.js";
 
 async function callRoutes(fastify, options) {
   // Get all calls with pagination and sorting
@@ -39,6 +40,13 @@ async function callRoutes(fastify, options) {
         details: error.message,
       });
     }
+  });
+  //get call recording_url form recording_sid
+  fastify.get("/api/calls/:id/get-recording", async (request, reply) => {
+    const { id } = request.params;
+    const call = await Call.findByPk(id);
+    const recording_url = await getCallRecordingURL(call.recording_sid);
+    return recording_url;
   });
 }
 

@@ -336,6 +336,7 @@ export default async function campaignRoutes(fastify, options) {
         limit,
         offset,
         attributes: [
+          "id",
           "call_sid",
           "from_number",
           "to_number",
@@ -344,7 +345,7 @@ export default async function campaignRoutes(fastify, options) {
           "end_time",
           "duration",
           "cost",
-          "recording_url",
+          "recording_sid",
           "contact_id",
         ],
         include: [
@@ -526,6 +527,7 @@ export default async function campaignRoutes(fastify, options) {
           button_states: buttonStates,
           call_logs: {
             data: callLogs.map((call) => ({
+              id: call.id,
               call_sid: call.call_sid,
               from: call.from_number,
               to: call.to_number,
@@ -538,7 +540,7 @@ export default async function campaignRoutes(fastify, options) {
                     .padStart(2, "0")}`
                 : null,
               cost: call.cost ? `$${parseFloat(call.cost).toFixed(4)}` : null,
-              recording: call.recording_url,
+              recording_sid: call.recording_sid,
               contact: call.contact
                 ? {
                     firstName: call.contact.firstName,
@@ -615,7 +617,7 @@ export default async function campaignRoutes(fastify, options) {
         end_time: call.end_time,
         duration: call.duration,
         cost: call.cost,
-        recording_url: call.recording_url,
+        recording_sid: call.recording_sid,
         contact: call.contact
           ? {
               firstName: call.contact.firstName,

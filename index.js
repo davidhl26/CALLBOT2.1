@@ -1484,8 +1484,9 @@ fastify.post("/call-status", async (request, reply) => {
         console.log("Call and campaign costs updated successfully");
       }
     } else if (webhookData.RecordingStatus === "completed") {
+      console.log("Recording completed", webhookData);
       // Update recording URL
-      await call.update({ recording_url: webhookData.RecordingUrl });
+      await call.update({ recording_sid: webhookData.RecordingSid });
       console.log("Call recording URL updated successfully");
     }
 

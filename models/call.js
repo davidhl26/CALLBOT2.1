@@ -41,8 +41,8 @@ const Call = sequelize.define(
     system_message: {
       type: DataTypes.TEXT,
     },
-    recording_url: {
-      type: DataTypes.TEXT,
+    recording_sid: {
+      type: DataTypes.STRING,
     },
     campaign_id: {
       type: DataTypes.INTEGER,
