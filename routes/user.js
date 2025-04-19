@@ -1,23 +1,34 @@
 import jwt from "jsonwebtoken";
+import { authenticate, authorize } from "../middleware/auth.js";
 import User from "../models/user.js";
 
 const userRoutes = async (fastify, options) => {
+  const auth = authenticate(fastify);
   // GET all users - for admin dashboard
-  fastify.get("/api/user", async (request, reply) => {
-    try {
-      const users = await User.findAll({
-        attributes: { exclude: ["password"] },
-      });
+  fastify.get(
+    "/api/user",
+    {
+      preHandler: [
+        auth, // First authenticate
+        authorize("Admin"), // Then check for admin role
+      ],
+    },
+    async (request, reply) => {
+      try {
+        const users = await User.findAll({
+          attributes: { exclude: ["password"] },
+        });
 
-      return users;
-    } catch (error) {
-      fastify.log.error(error);
-      return reply.code(500).send({
-        message: "Failed to fetch users",
-        error: error.message,
-      });
+        return users;
+      } catch (error) {
+        fastify.log.error(error);
+        return reply.code(500).send({
+          message: "Failed to fetch users",
+          error: error.message,
+        });
+      }
     }
-  });
+  );
 
   // POST - register/signup a new user
   fastify.post("/api/user/signup", async (request, reply) => {
@@ -141,68 +152,85 @@ const userRoutes = async (fastify, options) => {
   });
 
   // PUT - update user
-  fastify.put("/api/user/:id", async (request, reply) => {
-    try {
-      const { name, email, role, status } = request.body;
-      const userId = request.params.id;
+  fastify.put(
+    "/api/user/:id",
+    {
+      preHandler: [
+        auth, // First authenticate
+        authorize("Admin"), // Then check for admin role
+      ],
+    },
+    async (request, reply) => {
+      try {
+        const { name, email, role, status } = request.body;
+        const userId = request.params.id;
 
-      // Find user
-      const user = await User.findByPk(userId);
-      if (!user) {
-        return reply.code(404).send({ message: "User not found" });
+        // Find user
+        const user = await User.findByPk(userId);
+        if (!user) {
+          return reply.code(404).send({ message: "User not found" });
+        }
+
+        // Update user fields
+        await user.update({
+          name: name || user.name,
+          email: email || user.email,
+          role: role || user.role,
+          status: status || user.status,
+        });
+
+        // Return user without password
+        const userWithoutPassword = {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          status: user.status,
+          updatedAt: user.updatedAt,
+        };
+
+        return {
+          message: "User updated successfully",
+          user: userWithoutPassword,
+        };
+      } catch (error) {
+        fastify.log.error(error);
+        return reply.code(500).send({
+          message: "Failed to update user",
+          error: error.message,
+        });
       }
-
-      // Update user fields
-      await user.update({
-        name: name || user.name,
-        email: email || user.email,
-        role: role || user.role,
-        status: status || user.status,
-      });
-
-      // Return user without password
-      const userWithoutPassword = {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        status: user.status,
-        updatedAt: user.updatedAt,
-      };
-
-      return {
-        message: "User updated successfully",
-        user: userWithoutPassword,
-      };
-    } catch (error) {
-      fastify.log.error(error);
-      return reply.code(500).send({
-        message: "Failed to update user",
-        error: error.message,
-      });
     }
-  });
+  );
 
   // DELETE - delete user
-  fastify.delete("/api/user/:id", async (request, reply) => {
-    try {
-      const userId = request.params.id;
+  fastify.delete(
+    "/api/user/:id",
+    {
+      preHandler: [
+        auth, // First authenticate
+        authorize("Admin"), // Then check for admin role
+      ],
+    },
+    async (request, reply) => {
+      try {
+        const userId = request.params.id;
+        const user = await User.findByPk(userId);
+        if (!user) {
+          return reply.code(404).send({ message: "User not found" });
+        }
 
-      const user = await User.findByPk(userId);
-      if (!user) {
-        return reply.code(404).send({ message: "User not found" });
+        await user.destroy();
+        return { message: "User deleted successfully" };
+      } catch (error) {
+        fastify.log.error(error);
+        return reply.code(500).send({
+          message: "Failed to delete user",
+          error: error.message,
+        });
       }
-
-      await user.destroy();
-      return { message: "User deleted successfully" };
-    } catch (error) {
-      fastify.log.error(error);
-      return reply.code(500).send({
-        message: "Failed to delete user",
-        error: error.message,
-      });
     }
-  });
+  );
 };
 
 export default userRoutes;

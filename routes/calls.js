@@ -1,9 +1,11 @@
+import { authenticate } from "../middleware/auth.js";
 import Call from "../models/call.js";
 import { getCallRecordingURL } from "../utils/getCallRecordingURL.js";
 
 async function callRoutes(fastify, options) {
+  const auth = authenticate(fastify);
   // Get all calls with pagination and sorting
-  fastify.get("/api/calls", async (request, reply) => {
+  fastify.get("/api/calls", { preHandler: auth }, async (request, reply) => {
     try {
       const { page, limit } = request.query;
 
@@ -42,12 +44,16 @@ async function callRoutes(fastify, options) {
     }
   });
   //get call recording_url form recording_sid
-  fastify.get("/api/calls/:id/get-recording", async (request, reply) => {
-    const { id } = request.params;
-    const call = await Call.findByPk(id);
-    const recording_url = await getCallRecordingURL(call.recording_sid);
-    return recording_url;
-  });
+  fastify.get(
+    "/api/calls/:id/get-recording",
+    { preHandler: auth },
+    async (request, reply) => {
+      const { id } = request.params;
+      const call = await Call.findByPk(id);
+      const recording_url = await getCallRecordingURL(call.recording_sid);
+      return recording_url;
+    }
+  );
 }
 
 export default callRoutes;

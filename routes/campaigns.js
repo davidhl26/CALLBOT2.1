@@ -1,6 +1,7 @@
 import fastifyMultipart from "@fastify/multipart";
 import { parse } from "csv-parse/sync";
 import sequelize from "../config/sequelize.js";
+import { authenticate } from "../middleware/auth.js";
 import Call from "../models/call.js";
 import Campaign from "../models/campaign.js";
 import Contact from "../models/Contact.js"; // Fixed import path
@@ -12,6 +13,7 @@ import {
 } from "../services/campaign.js";
 
 export default async function campaignRoutes(fastify, options) {
+  const auth = authenticate(fastify);
   // Register multipart plugin
   fastify.register(fastifyMultipart, {
     limits: {
@@ -20,7 +22,7 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Create a new campaign
-  fastify.post("/", async (request, reply) => {
+  fastify.post("/", { preHandler: auth }, async (request, reply) => {
     try {
       const {
         name,
@@ -66,7 +68,7 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Get all campaigns with pagination
-  fastify.get("/", async (request, reply) => {
+  fastify.get("/", { preHandler: auth }, async (request, reply) => {
     try {
       const page = parseInt(request.query.page) || 1;
       const limit = parseInt(request.query.limit) || 10;
@@ -116,7 +118,7 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Start a campaign
-  fastify.post("/:id/start", async (request, reply) => {
+  fastify.post("/:id/start", { preHandler: auth }, async (request, reply) => {
     console.log("🚀 ~ fastify.post ~ request:", request.body);
     try {
       const campaign = await Campaign.findByPk(request.params.id);
@@ -146,7 +148,7 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Get single campaign
-  fastify.get("/:id", async (request, reply) => {
+  fastify.get("/:id", { preHandler: auth }, async (request, reply) => {
     try {
       const user_id = request.query.user_id;
 
@@ -196,7 +198,7 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Pause campaign
-  fastify.post("/:id/pause", async (request, reply) => {
+  fastify.post("/:id/pause", { preHandler: auth }, async (request, reply) => {
     try {
       const campaign = await Campaign.findByPk(request.params.id);
       if (!campaign) {
@@ -234,7 +236,7 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Restart a campaign
-  fastify.post("/:id/restart", async (request, reply) => {
+  fastify.post("/:id/restart", { preHandler: auth }, async (request, reply) => {
     try {
       const campaign = await Campaign.findByPk(request.params.id);
       if (!campaign) {
@@ -250,7 +252,7 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Recycle failed/unanswered calls in a campaign
-  fastify.post("/:id/recycle", async (request, reply) => {
+  fastify.post("/:id/recycle", { preHandler: auth }, async (request, reply) => {
     try {
       const campaign = await Campaign.findByPk(request.params.id);
       if (!campaign) {
@@ -266,28 +268,34 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Recycle unresponsive numbers
-  fastify.post("/:id/recycle-unresponsive", async (request, reply) => {
-    try {
-      const campaign = await Campaign.findByPk(request.params.id);
-      if (!campaign) {
-        return reply.code(404).send({ error: "Campaign not found" });
+  fastify.post(
+    "/:id/recycle-unresponsive",
+    { preHandler: auth },
+    async (request, reply) => {
+      try {
+        const campaign = await Campaign.findByPk(request.params.id);
+        if (!campaign) {
+          return reply.code(404).send({ error: "Campaign not found" });
+        }
+
+        // Use the recycleCampaign function which handles recycling of failed numbers
+        await recycleCampaign(campaign);
+
+        return {
+          success: true,
+          message: "Failed, no-answer, and busy numbers recycled successfully",
+        };
+      } catch (error) {
+        console.error("Error recycling unresponsive numbers:", error);
+        reply
+          .code(500)
+          .send({ error: "Failed to recycle unresponsive numbers" });
       }
-
-      // Use the recycleCampaign function which handles recycling of failed numbers
-      await recycleCampaign(campaign);
-
-      return {
-        success: true,
-        message: "Failed, no-answer, and busy numbers recycled successfully",
-      };
-    } catch (error) {
-      console.error("Error recycling unresponsive numbers:", error);
-      reply.code(500).send({ error: "Failed to recycle unresponsive numbers" });
     }
-  });
+  );
 
   // Get campaign statistics with call logs
-  fastify.get("/:id/stats", async (request, reply) => {
+  fastify.get("/:id/stats", { preHandler: auth }, async (request, reply) => {
     try {
       const campaign = await db.Campaign.findByPk(request.params.id);
 
@@ -570,7 +578,7 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Get call logs for a campaign
-  fastify.get("/:id/calls", async (request, reply) => {
+  fastify.get("/:id/calls", { preHandler: auth }, async (request, reply) => {
     try {
       const user_id = request.query.user_id;
 
@@ -649,174 +657,183 @@ export default async function campaignRoutes(fastify, options) {
   });
 
   // Add this new endpoint
-  fastify.post("/create-with-csv", async (request, reply) => {
-    try {
-      // Initialize variables to store form data
-      let csvFile;
-      let name;
-      let telnyxNumbers;
-      let systemMessage;
-      let firstMessage;
-      let aiProvider;
-      let voice;
-      let voiceId;
-      let language;
-      let user_id;
+  fastify.post(
+    "/create-with-csv",
+    { preHandler: auth },
+    async (request, reply) => {
+      try {
+        // Initialize variables to store form data
+        let csvFile;
+        let name;
+        let telnyxNumbers;
+        let systemMessage;
+        let firstMessage;
+        let aiProvider;
+        let voice;
+        let voiceId;
+        let language;
+        let user_id;
 
-      // Process all parts of the multipart form
-      for await (const part of request.parts()) {
-        if (part.type === "file") {
-          csvFile = await part.toBuffer();
-        } else {
-          // Handle other form fields
-          switch (part.fieldname) {
-            case "name":
-              name = part.value;
-              break;
-            case "telnyx_numbers":
-              telnyxNumbers = JSON.parse(part.value);
-              break;
-            case "system_message":
-              systemMessage = part.value;
-              break;
-            case "first_message":
-              firstMessage = part.value;
-              break;
-            case "ai_provider":
-              aiProvider = part.value;
-            case "voice":
-              voice = part.value;
-              break;
-            case "voice_id":
-              voiceId = part.value;
-              break;
-            case "language":
-              language = part.value;
-              break;
-            case "user_id":
-              user_id = part.value;
-              break;
+        // Process all parts of the multipart form
+        for await (const part of request.parts()) {
+          if (part.type === "file") {
+            csvFile = await part.toBuffer();
+          } else {
+            // Handle other form fields
+            switch (part.fieldname) {
+              case "name":
+                name = part.value;
+                break;
+              case "telnyx_numbers":
+                telnyxNumbers = JSON.parse(part.value);
+                break;
+              case "system_message":
+                systemMessage = part.value;
+                break;
+              case "first_message":
+                firstMessage = part.value;
+                break;
+              case "ai_provider":
+                aiProvider = part.value;
+              case "voice":
+                voice = part.value;
+                break;
+              case "voice_id":
+                voiceId = part.value;
+                break;
+              case "language":
+                language = part.value;
+                break;
+              case "user_id":
+                user_id = part.value;
+                break;
+            }
           }
         }
-      }
 
-      // Validate required fields
-      if (
-        !csvFile ||
-        !name ||
-        !telnyxNumbers ||
-        !systemMessage ||
-        !firstMessage ||
-        !aiProvider ||
-        !user_id
-      ) {
-        return reply.code(400).send({
-          error:
-            "Missing required fields: file, name, telnyx_numbers, system_message, first_message, ai_provider, user_id",
+        // Validate required fields
+        if (
+          !csvFile ||
+          !name ||
+          !telnyxNumbers ||
+          !systemMessage ||
+          !firstMessage ||
+          !aiProvider ||
+          !user_id
+        ) {
+          return reply.code(400).send({
+            error:
+              "Missing required fields: file, name, telnyx_numbers, system_message, first_message, ai_provider, user_id",
+          });
+        }
+
+        // Parse CSV
+        const csvContent = csvFile.toString();
+        const contacts = parse(csvContent, {
+          columns: true,
+          skip_empty_lines: true,
+          trim: true,
+        });
+
+        // Validate required fields
+        const requiredFields = [
+          "phoneNumber",
+          "firstName",
+          "lastName",
+          "gender",
+        ];
+        const missingFields = contacts.some((contact) =>
+          requiredFields.some((field) => !contact[field])
+        );
+
+        if (missingFields) {
+          return reply.code(400).send({
+            error:
+              "CSV must contain phoneNumber, firstName, lastName, and gender columns",
+          });
+        }
+
+        // Format phone numbers by adding "+" if not present
+        contacts.forEach((contact) => {
+          if (contact.phoneNumber && !contact.phoneNumber.startsWith("+")) {
+            contact.phoneNumber = "+" + contact.phoneNumber;
+          }
+        });
+
+        // Extract phone numbers for campaign
+        const phoneNumbers = contacts.map((contact) => contact.phoneNumber);
+
+        console.log("baaaaaaaaaaaaaaaaaaaal", {
+          name,
+          all_numbers: phoneNumbers,
+          numbers_to_call: phoneNumbers,
+          telnyx_numbers: telnyxNumbers,
+          system_message: systemMessage,
+          first_message: firstMessage,
+          ai_provider: aiProvider,
+          voice: voice,
+          voice_id: voiceId,
+          language: language,
+          status: "pending",
+          total_calls: phoneNumbers.length,
+        });
+
+        // Create campaign with the parsed form data
+        const campaign = await db.Campaign.create({
+          name,
+          all_numbers: phoneNumbers,
+          numbers_to_call: phoneNumbers,
+          telnyx_numbers: telnyxNumbers,
+          system_message: systemMessage,
+          first_message: firstMessage,
+          ai_provider: aiProvider,
+          voice: voice,
+          voice_id: voiceId,
+          language: language,
+          status: "pending",
+          total_calls: phoneNumbers.length,
+          user_id, // Add user_id to campaign
+        });
+
+        // Create or update contacts
+        await db.Contact.bulkCreate(
+          contacts.map((contact) => ({
+            phoneNumber: contact.phoneNumber,
+            firstName: contact.firstName,
+            lastName: contact.lastName,
+            gender: contact.gender,
+            email: contact.email || null,
+            company: contact.company || null,
+            notes: contact.notes || null,
+            status: "Active",
+            user_id, // Add user_id to all contacts
+          })),
+          {
+            updateOnDuplicate: [
+              "firstName",
+              "lastName",
+              "gender",
+              "email",
+              "company",
+              "notes",
+              "user_id", // Include user_id in updateOnDuplicate
+            ],
+            where: { phoneNumber: contacts.map((c) => c.phoneNumber) },
+          }
+        );
+
+        return {
+          success: true,
+          campaign,
+          contactsProcessed: contacts.length,
+        };
+      } catch (error) {
+        console.error("Error creating campaign from CSV:", error);
+        reply.code(500).send({
+          error: "Failed to create campaign from CSV",
+          details: error.message,
         });
       }
-
-      // Parse CSV
-      const csvContent = csvFile.toString();
-      const contacts = parse(csvContent, {
-        columns: true,
-        skip_empty_lines: true,
-        trim: true,
-      });
-
-      // Validate required fields
-      const requiredFields = ["phoneNumber", "firstName", "lastName", "gender"];
-      const missingFields = contacts.some((contact) =>
-        requiredFields.some((field) => !contact[field])
-      );
-
-      if (missingFields) {
-        return reply.code(400).send({
-          error:
-            "CSV must contain phoneNumber, firstName, lastName, and gender columns",
-        });
-      }
-
-      // Format phone numbers by adding "+" if not present
-      contacts.forEach((contact) => {
-        if (contact.phoneNumber && !contact.phoneNumber.startsWith("+")) {
-          contact.phoneNumber = "+" + contact.phoneNumber;
-        }
-      });
-
-      // Extract phone numbers for campaign
-      const phoneNumbers = contacts.map((contact) => contact.phoneNumber);
-
-      console.log("baaaaaaaaaaaaaaaaaaaal", {
-        name,
-        all_numbers: phoneNumbers,
-        numbers_to_call: phoneNumbers,
-        telnyx_numbers: telnyxNumbers,
-        system_message: systemMessage,
-        first_message: firstMessage,
-        ai_provider: aiProvider,
-        voice: voice,
-        voice_id: voiceId,
-        language: language,
-        status: "pending",
-        total_calls: phoneNumbers.length,
-      });
-
-      // Create campaign with the parsed form data
-      const campaign = await db.Campaign.create({
-        name,
-        all_numbers: phoneNumbers,
-        numbers_to_call: phoneNumbers,
-        telnyx_numbers: telnyxNumbers,
-        system_message: systemMessage,
-        first_message: firstMessage,
-        ai_provider: aiProvider,
-        voice: voice,
-        voice_id: voiceId,
-        language: language,
-        status: "pending",
-        total_calls: phoneNumbers.length,
-        user_id, // Add user_id to campaign
-      });
-
-      // Create or update contacts
-      await db.Contact.bulkCreate(
-        contacts.map((contact) => ({
-          phoneNumber: contact.phoneNumber,
-          firstName: contact.firstName,
-          lastName: contact.lastName,
-          gender: contact.gender,
-          email: contact.email || null,
-          company: contact.company || null,
-          notes: contact.notes || null,
-          status: "Active",
-          user_id, // Add user_id to all contacts
-        })),
-        {
-          updateOnDuplicate: [
-            "firstName",
-            "lastName",
-            "gender",
-            "email",
-            "company",
-            "notes",
-            "user_id", // Include user_id in updateOnDuplicate
-          ],
-          where: { phoneNumber: contacts.map((c) => c.phoneNumber) },
-        }
-      );
-
-      return {
-        success: true,
-        campaign,
-        contactsProcessed: contacts.length,
-      };
-    } catch (error) {
-      console.error("Error creating campaign from CSV:", error);
-      reply.code(500).send({
-        error: "Failed to create campaign from CSV",
-        details: error.message,
-      });
     }
-  });
+  );
 }
