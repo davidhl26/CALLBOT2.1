@@ -58,6 +58,18 @@ const Call = sequelize.define(
         key: "id",
       },
     },
+    unique_id: {
+      type: DataTypes.STRING,
+    },
+    intent: {
+      type: DataTypes.STRING,
+      defaultValue: "unsure",
+      allowNull: true,
+    },
+    note: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
   },
   {
     timestamps: true,

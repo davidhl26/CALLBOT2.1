@@ -347,6 +347,8 @@ export default async function campaignRoutes(fastify, options) {
           "cost",
           "recording_sid",
           "contact_id",
+          "intent",
+          "note",
         ],
         include: [
           {
@@ -541,6 +543,8 @@ export default async function campaignRoutes(fastify, options) {
                 : null,
               cost: call.cost ? `$${parseFloat(call.cost).toFixed(4)}` : null,
               recording_sid: call.recording_sid,
+              intent: call.intent,
+              note: call.note,
               contact: call.contact
                 ? {
                     firstName: call.contact.firstName,

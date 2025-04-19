@@ -22,9 +22,11 @@ import elevenLabsRoutes from "./routes/elevenLabsRoutes.js";
 import googleCalenderRoutes from "./routes/googleCalenderRoutes.js";
 import telnyxNumberRoutes from "./routes/telnyxNumbers.js";
 import userRoutes from "./routes/user.js";
+import webhookRoutes from "./routes/webhook.routes.js";
 import { processCampaignBatch } from "./services/campaign.js";
 import { cleanupCall } from "./utils/callCleanup.js";
 import { getSignedUrl } from "./utils/elevenLabs.js";
+import { generateSystemPrompt } from "./utils/generateSystemPrompt.js";
 import { bookCalendarEvent } from "./utils/googleCalendar.js";
 
 // Load environment variables from .env file
@@ -72,6 +74,7 @@ fastify.register(campaignRoutes, { prefix: "/api/campaigns" });
 fastify.register(elevenLabsRoutes);
 fastify.register(userRoutes);
 fastify.register(googleCalenderRoutes, { prefix: "/api/google-calendar" });
+fastify.register(webhookRoutes, { prefix: "/api/webhooks" });
 const now = new Date();
 const formattedDate = now.toLocaleDateString("en-US", {
   weekday: "long",
@@ -82,6 +85,8 @@ const formattedTime = now.toLocaleTimeString("en-US", {
   hour: "numeric",
   minute: "2-digit",
 });
+
+let unique_id = "";
 
 // Constants
 let SYSTEM_MESSAGE = `
@@ -290,6 +295,8 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
         "ElevenLabs credentials are missing. Please set ELEVENLABS_API_KEY and ELEVENLABS_AGENT_ID in your .env file.",
     });
   }
+  //for tracking purposes
+  unique_id = uuidv4();
 
   try {
     // Create a safe version of system_message and first_message for URL
@@ -301,7 +308,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
       From: from,
       UrlMethod: "GET",
       Record: "true",
-      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}&voice_id=${voice_id_final}&language=${language}&user_id=${user_id}`,
+      Url: `${process.env.PUBLIC_SERVER_URL}/outbound-call-handler-eleven-labs?system_message=${encodedSystemMessage}&first_message=${encodedFirstMessage}&voice_id=${voice_id_final}&language=${language}&user_id=${user_id}&unique_id=${unique_id}`,
       StatusCallback: `${process.env.PUBLIC_SERVER_URL}/call-status`,
     };
 
@@ -351,6 +358,7 @@ fastify.post("/initiate-call-eleven-labs", async (request, reply) => {
       system_message,
       first_message,
       provider: "eleven_labs",
+      unique_id,
     });
 
     console.log("ElevenLabs call record created:", call.toJSON());
@@ -395,6 +403,7 @@ fastify.all("/outbound-call-handler-eleven-labs", async (request, reply) => {
     voice_id,
     language,
     user_id,
+    unique_id,
   });
 
   // XML-encode the parameters
@@ -422,6 +431,7 @@ fastify.all("/outbound-call-handler-eleven-labs", async (request, reply) => {
                 <Parameter name="voice_id" value="${voice_id}" />
                 <Parameter name="language" value="${language}" />
                 <Parameter name="user_id" value="${user_id}" />
+                <Parameter name="unique_id" value="${unique_id}" />
             </Stream>
         </Connect>
     </Response>`;
@@ -547,12 +557,18 @@ fastify.register(async (fastifyInstance) => {
           dynamic_variables: {
             call_id: callSid || streamSid || "unknown",
             user_id: customParameters.user_id,
+            unique_id: customParameters.unique_id,
           },
           conversation_config_override: {
             agent: {
               prompt: {
                 // prompt: customParameters.system_message,
-                prompt: system_message_with_user_id,
+                // prompt: system_message_with_user_id,
+                prompt: generateSystemPrompt({
+                  userId: customParameters.user_id,
+                  unique_id: customParameters.unique_id,
+                  campaignPrompt: customParameters.system_message,
+                }),
               },
               first_message: customParameters.first_message,
               language: customParameters.language,
